@@ -1,5 +1,1 @@
 print("test 1")
-print("test 2")
-print("test 3")
-print("pra1")
-print("sha1")
