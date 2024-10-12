@@ -67,7 +67,7 @@ public class PeerForwardingProcessorDecorator implements Processor<Record<Event>
                     "Peer Forwarder Plugin: %s cannot have empty identification keys." + pluginId);
         }
 
-        final PeerForwarder peerForwarder = peerForwarderProvider.register(pipelineName, pluginId, identificationKeys, pipelineWorkerThreads);
+        final PeerForwarder peerForwarder = peerForwarderProvider.register(pipelineName, firstInnerProcessor, pluginId, identificationKeys, pipelineWorkerThreads);
 
         return processors.stream().map(processor -> new PeerForwardingProcessorDecorator(peerForwarder, processor))
                 .collect(Collectors.toList());
@@ -81,20 +81,24 @@ public class PeerForwardingProcessorDecorator implements Processor<Record<Event>
     @Override
     public Collection<Record<Event>> execute(final Collection<Record<Event>> records) {
         final Collection<Record<Event>> recordsToProcess = new ArrayList<>();
+        Collection<Record<Event>> recordsToProcessLocally = new ArrayList<>();
         final Collection<Record<Event>> recordsSkipped = new ArrayList<>();
         for (Record<Event> record: records) {
             if (((RequiresPeerForwarding)innerProcessor).isApplicableEventForPeerForwarding(record.getData())) {
                 recordsToProcess.add(record);
+            } else if (((RequiresPeerForwarding)innerProcessor).isForLocalProcessingOnly(record.getData())){
+                recordsToProcessLocally.add(record);
             } else {
                 recordsSkipped.add(record);
             }
         }
         final Collection<Record<Event>> recordsToProcessOnLocalPeer = peerForwarder.forwardRecords(recordsToProcess);
 
+        recordsToProcessLocally = CollectionUtils.union(recordsToProcessLocally, recordsToProcessOnLocalPeer);
+
         final Collection<Record<Event>> receivedRecordsFromBuffer = peerForwarder.receiveRecords();
 
-        final Collection<Record<Event>> recordsToProcessLocally = CollectionUtils.union(
-                recordsToProcessOnLocalPeer, receivedRecordsFromBuffer);
+        recordsToProcessLocally = CollectionUtils.union(recordsToProcessLocally, receivedRecordsFromBuffer);
 
         Collection<Record<Event>> recordsOut = innerProcessor.execute(recordsToProcessLocally);
         recordsOut.addAll(recordsSkipped);

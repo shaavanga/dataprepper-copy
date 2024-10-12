@@ -7,6 +7,11 @@ plugins {
     id 'java-library'
 }
 
+subprojects {
+    apply plugin: 'data-prepper.publish'
+    group = 'org.opensearch.dataprepper.plugins'
+}
+
 dependencies {
     subprojects.forEach { api project(':data-prepper-plugins:' + it.name) }
 }

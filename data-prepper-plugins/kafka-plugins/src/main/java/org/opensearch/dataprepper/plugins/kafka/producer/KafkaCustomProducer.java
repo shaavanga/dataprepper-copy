@@ -26,6 +26,7 @@ import org.opensearch.dataprepper.model.event.EventHandle;
 import org.opensearch.dataprepper.model.log.JacksonLog;
 import org.opensearch.dataprepper.model.record.Record;
 import org.opensearch.dataprepper.plugins.kafka.configuration.KafkaProducerConfig;
+import org.opensearch.dataprepper.plugins.kafka.configuration.KafkaProducerProperties;
 import org.opensearch.dataprepper.plugins.kafka.service.SchemaService;
 import org.opensearch.dataprepper.plugins.kafka.sink.DLQSink;
 import org.opensearch.dataprepper.plugins.kafka.util.KafkaTopicProducerMetrics;
@@ -109,6 +110,14 @@ public class KafkaCustomProducer<T> {
         }
     }
 
+    public Integer getMaxRequestSize() {
+        KafkaProducerProperties producerProperties = kafkaProducerConfig.getKafkaProducerProperties();
+        if (producerProperties != null) {
+            return Integer.valueOf(producerProperties.getMaxRequestSize());
+        }
+        return KafkaProducerProperties.DEFAULT_MAX_REQUEST_SIZE;
+    }
+
     public void produceRecords(final Record<Event> record) throws Exception {
         bufferedEventHandles.add(record.getData().getEventHandle());
         Event event = getEvent(record);
@@ -169,11 +178,11 @@ public class KafkaCustomProducer<T> {
     }
 
     Future send(final String topicName, String key, final Object record) throws Exception {
-        if (Objects.isNull(key)) {
-            return producer.send(new ProducerRecord(topicName, record), callBack(record));
-        }
+        ProducerRecord producerRecord = Objects.isNull(key) ?
+            new ProducerRecord(topicName, record) :
+            new ProducerRecord(topicName, key, record);
 
-        return producer.send(new ProducerRecord(topicName, key, record), callBack(record));
+        return producer.send(producerRecord, callBack(record));
     }
 
     private void publishJsonMessage(final Record<Event> record, final String key) throws IOException, ProcessingException, Exception {

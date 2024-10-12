@@ -22,17 +22,17 @@ dependencies {
     implementation 'com.fasterxml.jackson.core:jackson-databind'
     implementation libs.commons.io
     implementation libs.commons.compress
-    implementation 'joda-time:joda-time:2.12.6'
+    implementation 'joda-time:joda-time:2.12.7'
     implementation 'org.hibernate.validator:hibernate-validator:8.0.1.Final'
     implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-csv'
     implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310'
-    implementation 'org.xerial.snappy:snappy-java:1.1.10.5'
-    implementation 'org.apache.parquet:parquet-common:1.13.1'
+    implementation 'org.xerial.snappy:snappy-java:1.1.10.7'
+    implementation libs.parquet.common
     implementation 'dev.failsafe:failsafe:3.3.2'
     implementation 'org.apache.httpcomponents:httpcore:4.4.16'
     testImplementation libs.commons.lang3
-    testImplementation 'org.wiremock:wiremock:3.3.1'
-    testImplementation 'org.eclipse.jetty:jetty-bom:11.0.17'
+    testImplementation 'org.wiremock:wiremock:3.8.0'
+    testImplementation 'org.eclipse.jetty:jetty-bom:11.0.20'
     testImplementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml'
     testImplementation testLibs.junit.vintage
     testImplementation project(':data-prepper-test-common')
@@ -42,13 +42,18 @@ dependencies {
     testImplementation project(':data-prepper-plugins:avro-codecs')
     testImplementation project(':data-prepper-plugins:in-memory-source-coordination-store')
     testImplementation project(':data-prepper-core')
+    testImplementation project(':data-prepper-event')
     testImplementation project(':data-prepper-plugins:parquet-codecs')
+    testImplementation project(':data-prepper-test-event')
     testImplementation libs.avro.core
-    testImplementation testLibs.hadoop.common
-    testImplementation 'org.apache.parquet:parquet-avro:1.13.1'
-    testImplementation 'org.apache.parquet:parquet-column:1.13.1'
-    testImplementation 'org.apache.parquet:parquet-common:1.13.1'
-    testImplementation 'org.apache.parquet:parquet-hadoop:1.13.1'
+    testImplementation(libs.hadoop.common)  {
+        exclude group: 'org.eclipse.jetty'
+        exclude group: 'org.apache.hadoop', module: 'hadoop-auth'
+        exclude group: 'org.apache.zookeeper', module: 'zookeeper'
+    }
+    testImplementation libs.parquet.avro
+    testImplementation libs.parquet.column
+    testImplementation libs.parquet.hadoop
 }
 
 test {

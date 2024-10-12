@@ -78,7 +78,9 @@ regexEqualityOperator
 
 relationalOperatorExpression
     : relationalOperatorExpression relationalOperator setOperatorExpression
+    | relationalOperatorExpression relationalOperator typeOfOperatorExpression
     | setOperatorExpression
+    | typeOfOperatorExpression
     ;
 
 relationalOperator
@@ -86,6 +88,10 @@ relationalOperator
     | LTE
     | GT
     | GTE
+    ;
+
+typeOfOperatorExpression
+    : JsonPointer TYPEOF DataTypes
     ;
 
 setOperatorExpression
@@ -116,7 +122,11 @@ regexPattern
     ;
 
 setInitializer
-    : LBRACE primary (SET_DELIMITER primary)* RBRACE
+    : LBRACE setMembers RBRACE
+    ;
+
+setMembers
+    : literal (SPACE* SET_DELIMITER SPACE* literal)*
     ;
 
 unaryOperator
@@ -279,6 +289,17 @@ EscapeSequence
     : '\\' [btnfr"'\\$]
     ;
 
+DataTypes
+    : INTEGER
+    | BOOLEAN
+    | BIG_DECIMAL
+    | LONG
+    | MAP
+    | ARRAY
+    | DOUBLE
+    | STRING
+    ;
+
 SET_DELIMITER
     : COMMA
     ;
@@ -298,6 +319,7 @@ MATCH_REGEX_PATTERN : '=~';
 NOT_MATCH_REGEX_PATTERN : '!~';
 IN_SET : SPACE 'in' SPACE;
 NOT_IN_SET : SPACE 'not in' SPACE;
+TYPEOF: SPACE 'typeof' SPACE;
 AND : SPACE 'and' SPACE;
 OR : SPACE 'or' SPACE;
 NOT : 'not' SPACE;
@@ -316,6 +338,15 @@ EXPONENTLETTER
     : 'E'
     | 'e'
     ;
+
+INTEGER: 'integer';
+BIG_DECIMAL: 'big_decimal';
+BOOLEAN: 'boolean';
+LONG   : 'long';
+DOUBLE : 'double';
+STRING : 'string';
+MAP    : 'map';
+ARRAY  : 'array';
 
 fragment
 SPACE : ' ';

@@ -15,7 +15,8 @@ import org.opensearch.dataprepper.model.buffer.Buffer;
 import org.opensearch.dataprepper.model.codec.InputCodec;
 import org.opensearch.dataprepper.model.configuration.PluginModel;
 import org.opensearch.dataprepper.model.configuration.PluginSetting;
-import org.opensearch.dataprepper.model.event.JacksonEvent;
+import org.opensearch.dataprepper.model.event.EventBuilder;
+import org.opensearch.dataprepper.model.event.EventFactory;
 import org.opensearch.dataprepper.model.plugin.PluginFactory;
 import org.opensearch.dataprepper.model.record.Record;
 import org.opensearch.dataprepper.model.source.Source;
@@ -40,17 +41,24 @@ import static org.opensearch.dataprepper.logging.DataPrepperMarkers.SENSITIVE;
 public class FileSource implements Source<Record<Object>> {
     static final String MESSAGE_KEY = "message";
     private static final Logger LOG = LoggerFactory.getLogger(FileSource.class);
-    private static final TypeReference<Map<String, Object>> MAP_TYPE_REFERENCE = new TypeReference<Map<String, Object>>() {};
+    private static final TypeReference<Map<String, Object>> MAP_TYPE_REFERENCE = new TypeReference<>() { };
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final long STOP_WAIT_MILLIS = 200;
     private final FileSourceConfig fileSourceConfig;
     private final FileStrategy fileStrategy;
+    private final EventFactory eventFactory;
+
+    private Thread readThread;
 
     private boolean isStopRequested;
     private final int writeTimeout;
 
     @DataPrepperPluginConstructor
-    public FileSource(final FileSourceConfig fileSourceConfig, final PluginMetrics pluginMetrics, final PluginFactory pluginFactory) {
+    public FileSource(
+            final FileSourceConfig fileSourceConfig, final PluginMetrics pluginMetrics, final PluginFactory pluginFactory,
+            final EventFactory eventFactory) {
+        this.eventFactory = eventFactory;
         fileSourceConfig.validate();
         this.fileSourceConfig = fileSourceConfig;
         this.isStopRequested = false;
@@ -67,12 +75,26 @@ public class FileSource implements Source<Record<Object>> {
     @Override
     public void start(final Buffer<Record<Object>> buffer) {
         checkNotNull(buffer, "Buffer cannot be null for file source to start");
-        fileStrategy.start(buffer);
+
+        LOG.info("Starting file source with {} path.", fileSourceConfig.getFilePathToRead());
+
+        readThread = new Thread(() -> {
+            fileStrategy.start(buffer);
+            LOG.info("Completed reading file.");
+        }, "file-source");
+        readThread.setDaemon(false);
+        readThread.start();
     }
 
     @Override
     public void stop() {
         isStopRequested = true;
+
+        try {
+            readThread.join(STOP_WAIT_MILLIS);
+        } catch (final InterruptedException e) {
+            readThread.interrupt();
+        }
     }
 
     private interface FileStrategy {
@@ -106,8 +128,8 @@ public class FileSource implements Source<Record<Object>> {
                     break;
             }
 
-            return new Record<>(JacksonEvent
-                    .builder()
+            return new Record<>(
+            eventFactory.eventBuilder(EventBuilder.class)
                     .withEventType(fileSourceConfig.getRecordType())
                     .withData(structuredLine)
                     .build());

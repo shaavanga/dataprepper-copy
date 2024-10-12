@@ -35,6 +35,7 @@ import org.opensearch.dataprepper.model.event.exceptions.EventKeyNotFoundExcepti
 import org.opensearch.dataprepper.model.failures.DlqObject;
 import org.opensearch.dataprepper.model.opensearch.OpenSearchBulkActions;
 import org.opensearch.dataprepper.model.plugin.InvalidPluginConfigurationException;
+import org.opensearch.dataprepper.model.plugin.PluginConfigObservable;
 import org.opensearch.dataprepper.model.plugin.PluginFactory;
 import org.opensearch.dataprepper.model.record.Record;
 import org.opensearch.dataprepper.model.sink.AbstractSink;
@@ -81,6 +82,7 @@ import java.util.Optional;
 import java.util.StringJoiner;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -113,6 +115,7 @@ public class OpenSearchSink extends AbstractSink<Record<Event>> {
   private final String documentId;
   private final String routingField;
   private final String routing;
+  private final String pipeline;
   private final String action;
   private final List<Map<String, Object>> actions;
   private final String documentRootKey;
@@ -128,6 +131,7 @@ public class OpenSearchSink extends AbstractSink<Record<Event>> {
   private final DistributionSummary bulkRequestSizeBytesSummary;
   private final Counter dynamicDocumentVersionDroppedEvents;
   private OpenSearchClient openSearchClient;
+  private OpenSearchClientRefresher openSearchClientRefresher;
   private ObjectMapper objectMapper;
   private volatile boolean initialized;
   private PluginSetting pluginSetting;
@@ -139,13 +143,15 @@ public class OpenSearchSink extends AbstractSink<Record<Event>> {
   private DlqProvider dlqProvider;
   private final ConcurrentHashMap<Long, AccumulatingBulkRequest<BulkOperationWrapper, BulkRequest>> bulkRequestMap;
   private final ConcurrentHashMap<Long, Long> lastFlushTimeMap;
+  private final PluginConfigObservable pluginConfigObservable;
 
   @DataPrepperPluginConstructor
   public OpenSearchSink(final PluginSetting pluginSetting,
                         final PluginFactory pluginFactory,
                         final SinkContext sinkContext,
                         final ExpressionEvaluator expressionEvaluator,
-                        final AwsCredentialsSupplier awsCredentialsSupplier) {
+                        final AwsCredentialsSupplier awsCredentialsSupplier,
+                        final PluginConfigObservable pluginConfigObservable) {
     super(pluginSetting, Integer.MAX_VALUE, INITIALIZE_RETRY_WAIT_TIME_MS);
     this.awsCredentialsSupplier = awsCredentialsSupplier;
     this.sinkContext = sinkContext != null ? sinkContext : new SinkContext(null, Collections.emptyList(), Collections.emptyList(), Collections.emptyList());
@@ -165,6 +171,7 @@ public class OpenSearchSink extends AbstractSink<Record<Event>> {
     this.documentId = openSearchSinkConfig.getIndexConfiguration().getDocumentId();
     this.routingField = openSearchSinkConfig.getIndexConfiguration().getRoutingField();
     this.routing = openSearchSinkConfig.getIndexConfiguration().getRouting();
+    this.pipeline = openSearchSinkConfig.getIndexConfiguration().getPipeline();
     this.action = openSearchSinkConfig.getIndexConfiguration().getAction();
     this.actions = openSearchSinkConfig.getIndexConfiguration().getActions();
     this.documentRootKey = openSearchSinkConfig.getIndexConfiguration().getDocumentRootKey();
@@ -178,6 +185,8 @@ public class OpenSearchSink extends AbstractSink<Record<Event>> {
     this.pluginSetting = pluginSetting;
     this.bulkRequestMap = new ConcurrentHashMap<>();
     this.lastFlushTimeMap = new ConcurrentHashMap<>();
+    this.pluginConfigObservable = pluginConfigObservable;
+    this.objectMapper = new ObjectMapper();
 
     final Optional<PluginModel> dlqConfig = openSearchSinkConfig.getRetryConfiguration().getDlq();
     if (dlqConfig.isPresent()) {
@@ -193,7 +202,7 @@ public class OpenSearchSink extends AbstractSink<Record<Event>> {
         doInitializeInternal();
     } catch (IOException e) {
         LOG.warn("Failed to initialize OpenSearch sink, retrying: {} ", e.getMessage());
-        closeFiles();
+        this.shutdown();
     } catch (InvalidPluginConfigurationException e) {
         LOG.error("Failed to initialize OpenSearch sink due to a configuration error.", e);
         this.shutdown();
@@ -204,14 +213,27 @@ public class OpenSearchSink extends AbstractSink<Record<Event>> {
         throw e;
     } catch (Exception e) {
         LOG.warn("Failed to initialize OpenSearch sink with a retryable exception. ", e);
-        closeFiles();
+        this.shutdown();
     }
   }
 
   private void doInitializeInternal() throws IOException {
     LOG.info("Initializing OpenSearch sink");
-    restHighLevelClient = openSearchSinkConfig.getConnectionConfiguration().createClient(awsCredentialsSupplier);
-    openSearchClient = openSearchSinkConfig.getConnectionConfiguration().createOpenSearchClient(restHighLevelClient, awsCredentialsSupplier);
+    final ConnectionConfiguration connectionConfiguration = openSearchSinkConfig.getConnectionConfiguration();
+    restHighLevelClient = connectionConfiguration.createClient(awsCredentialsSupplier);
+    openSearchClient = connectionConfiguration.createOpenSearchClient(restHighLevelClient, awsCredentialsSupplier);
+    final Function<ConnectionConfiguration, OpenSearchClient> clientFunction =
+            (connectionConfiguration1) -> {
+      final RestHighLevelClient restHighLevelClient1 = connectionConfiguration1.createClient(awsCredentialsSupplier);
+      return connectionConfiguration1.createOpenSearchClient(restHighLevelClient1, awsCredentialsSupplier).withTransportOptions(
+              TransportOptions.builder()
+                      .setParameter("filter_path", "errors,took,items.*.error,items.*.status,items.*._index,items.*._id")
+                      .build());
+    };
+    openSearchClientRefresher = new OpenSearchClientRefresher(
+            pluginMetrics, connectionConfiguration, clientFunction);
+    pluginConfigObservable.addPluginConfigObserver(
+            newPluginSetting -> openSearchClientRefresher.update((PluginSetting) newPluginSetting));
     configuredIndexAlias = openSearchSinkConfig.getIndexConfiguration().getIndexAlias();
     final IndexTemplateAPIWrapper indexTemplateAPIWrapper = IndexTemplateAPIWrapperFactory.getWrapper(
             openSearchSinkConfig.getIndexConfiguration(), openSearchClient);
@@ -228,6 +250,10 @@ public class OpenSearchSink extends AbstractSink<Record<Event>> {
           .add(pluginSetting.getName()).toString());
       dlqWriter = potentialDlq.isPresent() ? potentialDlq.get() : null;
     }
+
+    // Attempt to update the serverless network policy if required argument are given.
+    maybeUpdateServerlessNetworkPolicy();
+
     indexManager.setupIndex();
 
     final Boolean requireAlias = indexManager.isIndexAlias(configuredIndexAlias);
@@ -245,11 +271,8 @@ public class OpenSearchSink extends AbstractSink<Record<Event>> {
     }
 
     final int maxRetries = openSearchSinkConfig.getRetryConfiguration().getMaxRetries();
-    final OpenSearchClient filteringOpenSearchClient = openSearchClient.withTransportOptions(
-            TransportOptions.builder()
-                    .setParameter("filter_path", "errors,took,items.*.error,items.*.status,items.*._index,items.*._id")
-                    .build());
-    bulkApiWrapper = BulkApiWrapperFactory.getWrapper(openSearchSinkConfig.getIndexConfiguration(), filteringOpenSearchClient);
+    bulkApiWrapper = BulkApiWrapperFactory.getWrapper(openSearchSinkConfig.getIndexConfiguration(),
+            () -> openSearchClientRefresher.get());
     bulkRetryStrategy = new BulkRetryStrategy(bulkRequest -> bulkApiWrapper.bulk(bulkRequest.getRequest()),
             this::logFailureForBulkRequests,
             pluginMetrics,
@@ -257,10 +280,6 @@ public class OpenSearchSink extends AbstractSink<Record<Event>> {
             bulkRequestSupplier,
             pluginSetting);
 
-    // Attempt to update the serverless network policy if required argument are given.
-    maybeUpdateServerlessNetworkPolicy();
-
-    objectMapper = new ObjectMapper();
     this.initialized = true;
     LOG.info("Initialized OpenSearch sink");
   }
@@ -282,6 +301,7 @@ public class OpenSearchSink extends AbstractSink<Record<Event>> {
     BulkOperation bulkOperation;
     final Optional<String> docId = document.getDocumentId();
     final Optional<String> routing = document.getRoutingField();
+    final Optional<String> pipeline = document.getPipelineField();
 
     if (StringUtils.equals(action, OpenSearchBulkActions.CREATE.toString())) {
        final CreateOperation.Builder<Object> createOperationBuilder =
@@ -290,6 +310,8 @@ public class OpenSearchSink extends AbstractSink<Record<Event>> {
              .document(document);
        docId.ifPresent(createOperationBuilder::id);
        routing.ifPresent(createOperationBuilder::routing);
+       pipeline.ifPresent(createOperationBuilder::pipeline);
+
        bulkOperation = new BulkOperation.Builder()
                            .create(createOperationBuilder.build())
                            .build();
@@ -309,7 +331,7 @@ public class OpenSearchSink extends AbstractSink<Record<Event>> {
         }
 
 
-          final UpdateOperation.Builder<Object> updateOperationBuilder = (action.toLowerCase() == OpenSearchBulkActions.UPSERT.toString()) ?
+          final UpdateOperation.Builder<Object> updateOperationBuilder = (StringUtils.equals(action.toLowerCase(), OpenSearchBulkActions.UPSERT.toString())) ?
               new UpdateOperation.Builder<>()
                   .index(indexName)
                   .document(filteredJsonNode)
@@ -350,6 +372,7 @@ public class OpenSearchSink extends AbstractSink<Record<Event>> {
               .versionType(versionType);
     docId.ifPresent(indexOperationBuilder::id);
     routing.ifPresent(indexOperationBuilder::routing);
+    pipeline.ifPresent(indexOperationBuilder::pipeline);
     bulkOperation = new BulkOperation.Builder()
                         .index(indexOperationBuilder.build())
                         .build();
@@ -425,9 +448,9 @@ public class OpenSearchSink extends AbstractSink<Record<Event>> {
       }
 
       SerializedJson serializedJsonNode = null;
-      if (StringUtils.equals(action, OpenSearchBulkActions.UPDATE.toString()) ||
-          StringUtils.equals(action, OpenSearchBulkActions.UPSERT.toString()) ||
-          StringUtils.equals(action, OpenSearchBulkActions.DELETE.toString())) {
+      if (StringUtils.equals(eventAction, OpenSearchBulkActions.UPDATE.toString()) ||
+          StringUtils.equals(eventAction, OpenSearchBulkActions.UPSERT.toString()) ||
+          StringUtils.equals(eventAction, OpenSearchBulkActions.DELETE.toString())) {
             serializedJsonNode = SerializedJson.fromJsonNode(event.getJsonNode(), document);
       }
       BulkOperation bulkOperation;
@@ -485,9 +508,21 @@ public class OpenSearchSink extends AbstractSink<Record<Event>> {
       }
     }
 
+    String pipelineValue = null;
+    if (pipeline != null) {
+      try {
+        pipelineValue = event.formatString(pipeline, expressionEvaluator);
+      } catch (final ExpressionEvaluationException | EventKeyNotFoundException e) {
+        LOG.error("Unable to construct pipeline with format {}", pipeline, e);
+      }
+      if (StringUtils.isEmpty(pipelineValue) || StringUtils.isBlank(pipelineValue)) {
+        pipelineValue = null;
+      }
+    }
+
     final String document = DocumentBuilder.build(event, documentRootKey, sinkContext.getTagsTargetKey(), sinkContext.getIncludeKeys(), sinkContext.getExcludeKeys());
 
-    return SerializedJson.fromStringAndOptionals(document, docId, routingValue);
+    return SerializedJson.fromStringAndOptionals(document, docId, routingValue, pipelineValue);
   }
 
   private void flushBatch(AccumulatingBulkRequest accumulatingBulkRequest) {
@@ -580,6 +615,7 @@ public class OpenSearchSink extends AbstractSink<Record<Event>> {
   public void shutdown() {
     super.shutdown();
     closeFiles();
+    openSearchClient.shutdown();
   }
 
   private void maybeUpdateServerlessNetworkPolicy() {

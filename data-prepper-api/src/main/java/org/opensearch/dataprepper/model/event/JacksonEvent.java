@@ -11,6 +11,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectReader;
+import com.fasterxml.jackson.databind.cfg.JsonNodeFeature;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.type.TypeFactory;
@@ -26,17 +28,18 @@ import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.StringJoiner;
 
-import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
+import static org.opensearch.dataprepper.model.event.JacksonEventKey.trimTrailingSlashInKey;
 
 /**
  * A Jackson Implementation of {@link Event} interface. This implementation relies heavily on JsonNode to manage the keys of the event.
@@ -60,11 +63,14 @@ public class JacksonEvent implements Event {
 
     private static final String SEPARATOR = "/";
 
-    private static final ObjectMapper mapper = new ObjectMapper()
+    private static final ObjectMapper mapper = JsonMapper.builder()
+            .disable(JsonNodeFeature.STRIP_TRAILING_BIGDECIMAL_ZEROES)
+            .build()
             .registerModule(new JavaTimeModule())
             .registerModule(new Jdk8Module()); // required for using Optional with Jackson. Ref: https://github.com/FasterXML/jackson-modules-java8
 
-    private static final TypeReference<Map<String, Object>> MAP_TYPE_REFERENCE = new TypeReference<Map<String, Object>>() {
+
+    private static final TypeReference<Map<String, Object>> MAP_TYPE_REFERENCE = new TypeReference<>() {
     };
 
     private final EventMetadata eventMetadata;
@@ -93,6 +99,10 @@ public class JacksonEvent implements Event {
 
         this.jsonNode = getInitialJsonNode(builder.data);
         this.eventHandle = new DefaultEventHandle(eventMetadata.getTimeReceived());
+        final Instant externalOriginationTime = this.eventMetadata.getExternalOriginationTime();
+        if (externalOriginationTime != null) {
+            eventHandle.setExternalOriginationTime(externalOriginationTime);
+        }
     }
 
     protected JacksonEvent(final JacksonEvent otherEvent) {
@@ -127,20 +137,15 @@ public class JacksonEvent implements Event {
         return jsonNode;
     }
 
-    /**
-     * Adds or updates the key with a given value in the Event.
-     *
-     * @param key   where the value will be set
-     * @param value value to set the key to
-     * @since 1.2
-     */
     @Override
-    public void put(final String key, final Object value) {
-        checkArgument(!key.isEmpty(), "key cannot be an empty string for put method");
+    public void put(EventKey key, Object value) {
+        final JacksonEventKey jacksonEventKey = asJacksonEventKey(key);
 
-        final String trimmedKey = checkAndTrimKey(key);
+        if(!jacksonEventKey.supports(EventKeyFactory.EventAction.PUT)) {
+            throw new IllegalArgumentException("key cannot be an empty string for put method");
+        }
 
-        final LinkedList<String> keys = new LinkedList<>(Arrays.asList(trimmedKey.split(SEPARATOR, -1)));
+        final Deque<String> keys = new LinkedList<>(jacksonEventKey.getKeyPathList());
 
         JsonNode parentNode = jsonNode;
 
@@ -154,6 +159,19 @@ public class JacksonEvent implements Event {
                 }
             }
         }
+    }
+
+    /**
+     * Adds or updates the key with a given value in the Event.
+     *
+     * @param key   where the value will be set
+     * @param value value to set the key to
+     * @since 1.2
+     */
+    @Override
+    public void put(final String key, final Object value) {
+        final JacksonEventKey jacksonEventKey = new JacksonEventKey(key, true, EventKeyFactory.EventAction.PUT);
+        put(jacksonEventKey, value);
     }
 
     @Override
@@ -179,6 +197,27 @@ public class JacksonEvent implements Event {
         return childNode;
     }
 
+    @Override
+    public <T> T get(EventKey key, Class<T> clazz) {
+        JacksonEventKey jacksonEventKey = asJacksonEventKey(key);
+
+        final JsonNode node = getNode(jacksonEventKey);
+        if (node.isMissingNode()) {
+            return null;
+        }
+
+        return mapNodeToObject(key.getKey(), node, clazz);
+    }
+
+    private static JacksonEventKey asJacksonEventKey(EventKey key) {
+        if(!(key instanceof JacksonEventKey)) {
+            throw new IllegalArgumentException("The key provided must be obtained through the EventKeyFactory.");
+        }
+
+        JacksonEventKey jacksonEventKey = (JacksonEventKey) key;
+        return jacksonEventKey;
+    }
+
     /**
      * Retrieves the value of type clazz from the key.
      *
@@ -190,20 +229,17 @@ public class JacksonEvent implements Event {
      */
     @Override
     public <T> T get(final String key, final Class<T> clazz) {
-
-        final String trimmedKey = checkAndTrimKey(key);
-
-        final JsonNode node = getNode(trimmedKey);
-        if (node.isMissingNode()) {
-            return null;
-        }
-
-        return mapNodeToObject(key, node, clazz);
+        final JacksonEventKey jacksonEventKey = new JacksonEventKey(key, true, EventKeyFactory.EventAction.GET);
+        return get(jacksonEventKey, clazz);
     }
 
     private JsonNode getNode(final String key) {
         final JsonPointer jsonPointer = toJsonPointer(key);
         return jsonNode.at(jsonPointer);
+    }
+
+    private JsonNode getNode(final JacksonEventKey key) {
+        return jsonNode.at(key.getJsonPointer());
     }
 
     private <T> T mapNodeToObject(final String key, final JsonNode node, final Class<T> clazz) {
@@ -213,6 +249,18 @@ public class JacksonEvent implements Event {
             LOG.error("Unable to map {} to {}", key, clazz, e);
             throw new RuntimeException(String.format("Unable to map %s to %s", key, clazz), e);
         }
+    }
+
+    @Override
+    public <T> List<T> getList(EventKey key, Class<T> clazz) {
+        JacksonEventKey jacksonEventKey = asJacksonEventKey(key);
+
+        final JsonNode node = getNode(jacksonEventKey);
+        if (node.isMissingNode()) {
+            return null;
+        }
+
+        return mapNodeToList(jacksonEventKey.getKey(), node, clazz);
     }
 
     /**
@@ -226,15 +274,8 @@ public class JacksonEvent implements Event {
      */
     @Override
     public <T> List<T> getList(final String key, final Class<T> clazz) {
-
-        final String trimmedKey = checkAndTrimKey(key);
-
-        final JsonNode node = getNode(trimmedKey);
-        if (node.isMissingNode()) {
-            return null;
-        }
-
-        return mapNodeToList(key, node, clazz);
+        JacksonEventKey jacksonEventKey = new JacksonEventKey(key, true, EventKeyFactory.EventAction.GET);
+        return getList(jacksonEventKey, clazz);
     }
 
     private <T> List<T> mapNodeToList(final String key, final JsonNode node, final Class<T> clazz) {
@@ -257,16 +298,15 @@ public class JacksonEvent implements Event {
         return JsonPointer.compile(jsonPointerExpression);
     }
 
-    /**
-     * Deletes the key from the event.
-     *
-     * @param key the field to be deleted
-     */
     @Override
-    public void delete(final String key) {
+    public void delete(final EventKey key) {
+        final JacksonEventKey jacksonEventKey = asJacksonEventKey(key);
 
-        checkArgument(!key.isEmpty(), "key cannot be an empty string for delete method");
-        final String trimmedKey = checkAndTrimKey(key);
+        if(!jacksonEventKey.supports(EventKeyFactory.EventAction.DELETE)) {
+            throw new IllegalArgumentException("key cannot be an empty string for delete method");
+        }
+
+        final String trimmedKey = jacksonEventKey.getTrimmedKey();
         final int index = trimmedKey.lastIndexOf(SEPARATOR);
 
         JsonNode baseNode = jsonNode;
@@ -283,20 +323,47 @@ public class JacksonEvent implements Event {
         }
     }
 
+    /**
+     * Deletes the key from the event.
+     *
+     * @param key the field to be deleted
+     */
+    @Override
+    public void delete(final String key) {
+        final JacksonEventKey jacksonEventKey = new JacksonEventKey(key, true, EventKeyFactory.EventAction.DELETE);
+        delete(jacksonEventKey);
+    }
+
+    @Override
+    public void clear() {
+        // Delete all entries from the event
+        Iterator iter = toMap().keySet().iterator();
+        JsonNode baseNode = jsonNode;
+        while (iter.hasNext()) {
+            ((ObjectNode) baseNode).remove((String)iter.next());
+        }
+    }
+
     @Override
     public String toJsonString() {
         return jsonNode.toString();
     }
 
     @Override
-    public String getAsJsonString(final String key) {
-        final String trimmedKey = checkAndTrimKey(key);
+    public String getAsJsonString(EventKey key) {
 
-        final JsonNode node = getNode(trimmedKey);
+        JacksonEventKey jacksonEventKey = asJacksonEventKey(key);
+        final JsonNode node = getNode(jacksonEventKey);
         if (node.isMissingNode()) {
             return null;
         }
         return node.toString();
+    }
+
+    @Override
+    public String getAsJsonString(final String key) {
+        JacksonEventKey jacksonEventKey = new JacksonEventKey(key, true, EventKeyFactory.EventAction.GET);
+        return getAsJsonString(jacksonEventKey);
     }
 
     /**
@@ -309,7 +376,7 @@ public class JacksonEvent implements Event {
      */
     @Override
     public String formatString(final String format) {
-        return formatStringInternal(format, null);
+        return formatStringInternal(format, null, null);
     }
 
     /**
@@ -323,10 +390,16 @@ public class JacksonEvent implements Event {
      */
     @Override
     public String formatString(final String format, final ExpressionEvaluator expressionEvaluator) {
-        return formatStringInternal(format, expressionEvaluator);
+        return formatStringInternal(format, expressionEvaluator, null);
     }
 
-    private String formatStringInternal(final String format, final ExpressionEvaluator expressionEvaluator) {
+    @Override
+    public String formatString(final String format, final ExpressionEvaluator expressionEvaluator, final String defaultValue) {
+        return formatStringInternal(format, expressionEvaluator, defaultValue);
+    }
+
+
+    private String formatStringInternal(final String format, final ExpressionEvaluator expressionEvaluator, final String defaultValue) {
         int fromIndex = 0;
         String result = "";
         int position = 0;
@@ -350,7 +423,11 @@ public class JacksonEvent implements Event {
                 if (expressionEvaluator != null && expressionEvaluator.isValidExpressionStatement(name)) {
                     val = expressionEvaluator.evaluate(name, this);
                 } else {
-                    throw new EventKeyNotFoundException(String.format("The key %s could not be found in the Event when formatting", name));
+                    if (defaultValue == null) {
+                        throw new EventKeyNotFoundException(String.format("The key %s could not be found in the Event when formatting", name));
+                    }
+
+                    val = defaultValue;
                 }
             }
 
@@ -372,22 +449,33 @@ public class JacksonEvent implements Event {
     }
 
     @Override
-    public boolean containsKey(final String key) {
+    public boolean containsKey(EventKey key) {
+        JacksonEventKey jacksonEventKey = asJacksonEventKey(key);
 
-        final String trimmedKey = checkAndTrimKey(key);
-
-        final JsonNode node = getNode(trimmedKey);
+        final JsonNode node = getNode(jacksonEventKey);
 
         return !node.isMissingNode();
     }
 
     @Override
-    public boolean isValueAList(final String key) {
-        final String trimmedKey = checkAndTrimKey(key);
+    public boolean containsKey(final String key) {
+        JacksonEventKey jacksonEventKey = new JacksonEventKey(key, true, EventKeyFactory.EventAction.GET);
+        return containsKey(jacksonEventKey);
+    }
 
-        final JsonNode node = getNode(trimmedKey);
+    @Override
+    public boolean isValueAList(EventKey key) {
+        JacksonEventKey jacksonEventKey = asJacksonEventKey(key);
+
+        final JsonNode node = getNode(jacksonEventKey);
 
         return node.isArray();
+    }
+
+    @Override
+    public boolean isValueAList(final String key) {
+        JacksonEventKey jacksonEventKey = new JacksonEventKey(key, true, EventKeyFactory.EventAction.GET);
+        return isValueAList(jacksonEventKey);
     }
 
     @Override
@@ -397,59 +485,13 @@ public class JacksonEvent implements Event {
 
 
     public static boolean isValidEventKey(final String key) {
-        try {
-            checkKey(key);
-            return true;
-        } catch (final Exception e) {
-            return false;
-        }
-    }
-    private String checkAndTrimKey(final String key) {
-        checkKey(key);
-        return trimTrailingSlashInKey(key);
-    }
-
-    private static void checkKey(final String key) {
-        checkNotNull(key, "key cannot be null");
-        if (key.isEmpty()) {
-            // Empty string key is valid
-            return;
-        }
-        if (key.length() > MAX_KEY_LENGTH) {
-            throw new IllegalArgumentException("key cannot be longer than " + MAX_KEY_LENGTH + " characters");
-        }
-        if (!isValidKey(key)) {
-            throw new IllegalArgumentException("key " + key + " must contain only alphanumeric chars with .-_@/ and must follow JsonPointer (ie. 'field/to/key')");
-        }
+        return JacksonEventKey.isValidEventKey(key);
     }
 
     private String trimKey(final String key) {
 
         final String trimmedLeadingSlash = key.startsWith(SEPARATOR) ? key.substring(1) : key;
         return trimTrailingSlashInKey(trimmedLeadingSlash);
-    }
-
-    private String trimTrailingSlashInKey(final String key) {
-        return key.length() > 1 && key.endsWith(SEPARATOR) ? key.substring(0, key.length() - 1) : key;
-    }
-
-    private static boolean isValidKey(final String key) {
-        for (int i = 0; i < key.length(); i++) {
-            char c = key.charAt(i);
-
-            if (!(c >= 48 && c <= 57
-                    || c >= 65 && c <= 90
-                    || c >= 97 && c <= 122
-                    || c == '.'
-                    || c == '-'
-                    || c == '_'
-                    || c == '@'
-                    || c == '/')) {
-
-                return false;
-            }
-        }
-        return true;
     }
 
     /**

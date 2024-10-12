@@ -8,10 +8,12 @@ package org.opensearch.dataprepper.plugins.processor.date;
 import io.micrometer.core.instrument.Counter;
 import org.apache.commons.lang3.tuple.Pair;
 import org.opensearch.dataprepper.expression.ExpressionEvaluator;
+import static org.opensearch.dataprepper.logging.DataPrepperMarkers.NOISY;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPlugin;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPluginConstructor;
 import org.opensearch.dataprepper.model.event.Event;
+import org.opensearch.dataprepper.model.plugin.InvalidPluginConfigurationException;
 import org.opensearch.dataprepper.model.processor.AbstractProcessor;
 import org.opensearch.dataprepper.model.processor.Processor;
 import org.opensearch.dataprepper.model.record.Record;
@@ -63,6 +65,10 @@ public class DateProcessor extends AbstractProcessor<Record<Event>, Record<Event
 
         if (dateProcessorConfig.getMatch() != null)
             extractKeyAndFormatters();
+
+        if (dateProcessorConfig.getDateWhen() != null && (!expressionEvaluator.isValidExpressionStatement(dateProcessorConfig.getDateWhen()))) {
+            throw new InvalidPluginConfigurationException("date_when {} is not a valid expression statement. See https://opensearch.org/docs/latest/data-prepper/pipelines/expression-syntax/ for valid expression syntax");
+        }
     }
 
     @Override
@@ -97,7 +103,7 @@ public class DateProcessor extends AbstractProcessor<Record<Event>, Record<Event
                     record.getData().put(dateProcessorConfig.getDestination(), zonedDateTime);
                 }
             } catch (final Exception e) {
-                LOG.error("An exception occurred while attempting to process Event: ", e);
+                LOG.error(NOISY,"An exception occurred while attempting to process Event: ", e);
             }
 
         }

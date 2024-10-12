@@ -6,13 +6,22 @@
 package org.opensearch.dataprepper.plugins.sink.s3.accumulator;
 
 import org.opensearch.dataprepper.plugins.codec.parquet.S3OutputStream;
-import software.amazon.awssdk.services.s3.S3Client;
+import org.opensearch.dataprepper.plugins.sink.s3.ownership.BucketOwnerProvider;
+import software.amazon.awssdk.services.s3.S3AsyncClient;
 
+import java.util.Map;
 import java.util.function.Supplier;
+import java.util.function.Function;
+
 
 public class MultipartBufferFactory implements BufferFactory {
     @Override
-    public Buffer getBuffer(S3Client s3Client, Supplier<String> bucketSupplier, Supplier<String> keySupplier) {
-        return new MultipartBuffer(new S3OutputStream(s3Client, bucketSupplier, keySupplier));
+    public Buffer getBuffer(final S3AsyncClient s3Client,
+                            final Supplier<String> bucketSupplier,
+                            final Supplier<String> keySupplier,
+                            final String defaultBucket,
+                            final Function<Integer, Map<String, String>> metadataSupplier,
+                            final BucketOwnerProvider bucketOwnerProvider) {
+        return new MultipartBuffer(new S3OutputStream(s3Client, bucketSupplier, keySupplier, defaultBucket, bucketOwnerProvider));
     }
 }

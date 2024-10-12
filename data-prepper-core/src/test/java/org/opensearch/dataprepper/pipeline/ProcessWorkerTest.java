@@ -12,6 +12,7 @@ import org.opensearch.dataprepper.model.buffer.Buffer;
 import org.opensearch.dataprepper.model.event.DefaultEventHandle;
 import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.event.EventHandle;
+import org.opensearch.dataprepper.model.event.InternalEventHandle;
 import org.opensearch.dataprepper.model.processor.Processor;
 import org.opensearch.dataprepper.model.record.Record;
 import org.opensearch.dataprepper.model.source.Source;
@@ -27,7 +28,6 @@ import java.util.Map;
 import java.util.concurrent.Future;
 
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -104,7 +104,6 @@ public class ProcessWorkerTest {
         final Record<Event> mockRecord = mock(Record.class);
         final Event mockEvent = mock(Event.class);
         final EventHandle eventHandle = mock(DefaultEventHandle.class);
-        when(((DefaultEventHandle) eventHandle).getAcknowledgementSet()).thenReturn(mock(AcknowledgementSet.class));
         when(mockRecord.getData()).thenReturn(mockEvent);
         when(mockEvent.getEventHandle()).thenReturn(eventHandle);
 
@@ -174,8 +173,8 @@ public class ProcessWorkerTest {
         final Record<Event> mockRecord = mock(Record.class);
         final Event mockEvent = mock(Event.class);
         final EventHandle eventHandle = mock(DefaultEventHandle.class);
-        when(((DefaultEventHandle) eventHandle).getAcknowledgementSet()).thenReturn(mock(AcknowledgementSet.class));
-        doNothing().when(eventHandle).release(true);
+        final AcknowledgementSet acknowledgementSet = mock(AcknowledgementSet.class);
+        ((InternalEventHandle)eventHandle).addAcknowledgementSet(acknowledgementSet);
         when(mockRecord.getData()).thenReturn(mockEvent);
         when(mockEvent.getEventHandle()).thenReturn(eventHandle);
 
@@ -207,5 +206,48 @@ public class ProcessWorkerTest {
         }
 
         verify(skippedProcessor, never()).execute(any());
+    }
+
+    @Test
+    void testProcessWorkerWithProcessorDroppingAllRecordsAndAcknowledgmentsEnabledIsHandledProperly() {
+
+        when(source.areAcknowledgementsEnabled()).thenReturn(true);
+
+        final List<Record<Event>> records = new ArrayList<>();
+        final Record<Event> mockRecord = mock(Record.class);
+        final Event mockEvent = mock(Event.class);
+        final EventHandle eventHandle = mock(DefaultEventHandle.class);
+        final AcknowledgementSet acknowledgementSet = mock(AcknowledgementSet.class);
+        ((InternalEventHandle)eventHandle).addAcknowledgementSet(acknowledgementSet);
+        when(mockRecord.getData()).thenReturn(mockEvent);
+        when(mockEvent.getEventHandle()).thenReturn(eventHandle);
+
+        records.add(mockRecord);
+
+        final CheckpointState checkpointState = mock(CheckpointState.class);
+        final Map.Entry<Collection, CheckpointState> readResult = Map.entry(records, checkpointState);
+        when(buffer.read(pipeline.getReadBatchTimeoutInMillis())).thenReturn(readResult);
+
+        final Processor processor = mock(Processor.class);
+        when(processor.execute(records)).thenReturn(Collections.emptyList());
+        when(processor.isReadyForShutdown()).thenReturn(true);
+
+        final Processor secondProcessor = mock(Processor.class);
+        when(secondProcessor.isReadyForShutdown()).thenReturn(true);
+        when(secondProcessor.execute(Collections.emptyList())).thenReturn(Collections.emptyList());
+        processors = List.of(processor, secondProcessor);
+
+        final FutureHelperResult<Void> futureHelperResult = mock(FutureHelperResult.class);
+        when(futureHelperResult.getFailedReasons()).thenReturn(Collections.emptyList());
+
+
+        try (final MockedStatic<FutureHelper> futureHelperMockedStatic = mockStatic(FutureHelper.class)) {
+            futureHelperMockedStatic.when(() -> FutureHelper.awaitFuturesIndefinitely(sinkFutures))
+                    .thenReturn(futureHelperResult);
+
+            final ProcessWorker processWorker = createObjectUnderTest();
+
+            processWorker.run();
+        }
     }
 }

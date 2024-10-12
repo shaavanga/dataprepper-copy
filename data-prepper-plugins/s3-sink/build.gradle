@@ -11,16 +11,22 @@ dependencies {
     implementation 'com.fasterxml.jackson.core:jackson-core'
     implementation 'com.fasterxml.jackson.core:jackson-databind'
     implementation libs.commons.compress
-    implementation 'joda-time:joda-time:2.12.5'
+    implementation 'joda-time:joda-time:2.12.7'
     implementation 'org.hibernate.validator:hibernate-validator:8.0.1.Final'
     implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-csv'
+    implementation 'software.amazon.awssdk:netty-nio-client'
     implementation 'software.amazon.awssdk:s3'
     implementation 'software.amazon.awssdk:sts'
+    implementation 'software.amazon.awssdk:securitylake:2.28.20'
     implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.9.22'
     implementation project(':data-prepper-plugins:avro-codecs')
     implementation libs.avro.core
-    implementation libs.hadoop.common
-    implementation 'org.apache.parquet:parquet-avro:1.13.1'
+    implementation(libs.hadoop.common) {
+        exclude group: 'org.eclipse.jetty'
+        exclude group: 'org.apache.hadoop', module: 'hadoop-auth'
+        exclude group: 'org.apache.zookeeper', module: 'zookeeper'
+    }
+    implementation libs.parquet.avro
     implementation 'software.amazon.awssdk:apache-client'
     implementation 'org.jetbrains.kotlin:kotlin-stdlib-common:1.9.22'
     implementation libs.commons.lang3
@@ -29,15 +35,13 @@ dependencies {
     testImplementation project(':data-prepper-plugins:parse-json-processor')
     testImplementation project(':data-prepper-plugins:csv-processor')
     testImplementation testLibs.slf4j.simple
-    testImplementation 'software.amazon.awssdk:s3-transfer-manager'
-    testImplementation 'software.amazon.awssdk.crt:aws-crt:0.25.0'
 
     constraints {
         implementation('com.nimbusds:nimbus-jose-jwt') {
             version {
-                require '9.37.1'
+                require '9.37.2'
             }
-            because 'Fixes CVE-2021-31684 and CVE-2023-1370 by using a newer shaded version of json-smart.'
+            because 'Fixes CVE-2023-52428, CVE-2021-31684 and CVE-2023-1370 by using a newer shaded version of json-smart.'
         }
     }
 }

@@ -6,6 +6,7 @@
 package org.opensearch.dataprepper;
 
 import io.micrometer.core.instrument.util.StringUtils;
+import org.opensearch.dataprepper.model.configuration.PipelinesDataFlowModel;
 import org.opensearch.dataprepper.model.plugin.PluginFactory;
 import org.opensearch.dataprepper.parser.PipelineTransformer;
 import org.opensearch.dataprepper.peerforwarder.server.PeerForwarderServer;
@@ -19,6 +20,8 @@ import org.springframework.context.annotation.Lazy;
 
 import javax.inject.Inject;
 import javax.inject.Named;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Predicate;
 
@@ -40,12 +43,13 @@ public class DataPrepper implements PipelinesProvider {
     private final PipelinesObserver pipelinesObserver;
     private final Map<String, Pipeline> transformationPipelines;
     private final Predicate<Map<String, Pipeline>> shouldShutdownOnPipelineFailurePredicate;
+    private final PipelinesDataFlowModel pipelinesDataFlowModel;
 
     // TODO: Remove DataPrepperServer dependency on DataPrepper
     @Inject
     @Lazy
     private DataPrepperServer dataPrepperServer;
-    private DataPrepperShutdownListener shutdownListener;
+    private List<DataPrepperShutdownListener> shutdownListeners = new LinkedList<>();
 
     /**
      * returns serviceName if exists or default serviceName
@@ -65,8 +69,9 @@ public class DataPrepper implements PipelinesProvider {
         this.pluginFactory = pluginFactory;
 
         transformationPipelines = pipelineTransformer.transformConfiguration();
+        pipelinesDataFlowModel = pipelineTransformer.getPipelinesDataFlowModel();
         this.shouldShutdownOnPipelineFailurePredicate = shouldShutdownOnPipelineFailurePredicate;
-        if (transformationPipelines.size() == 0) {
+        if (transformationPipelines.isEmpty()) {
             throw new RuntimeException("No valid pipeline is available for execution, exiting");
         }
         this.peerForwarderServer = peerForwarderServer;
@@ -95,17 +100,21 @@ public class DataPrepper implements PipelinesProvider {
         shutdownServers();
     }
 
+    private void shutdownPipelines() {
+        shutdownPipelines(DataPrepperShutdownOptions.defaultOptions());
+    }
+
     /**
      * Triggers the shutdown of all configured valid pipelines.
      */
-    public void shutdownPipelines() {
+    public void shutdownPipelines(final DataPrepperShutdownOptions shutdownOptions) {
         transformationPipelines.forEach((name, pipeline) -> {
             pipeline.removeShutdownObserver(pipelinesObserver);
         });
 
         for (final Pipeline pipeline : transformationPipelines.values()) {
             LOG.info("Shutting down pipeline: {}", pipeline.getName());
-            pipeline.shutdown();
+            pipeline.shutdown(shutdownOptions);
         }
     }
 
@@ -115,8 +124,8 @@ public class DataPrepper implements PipelinesProvider {
     public void shutdownServers() {
         dataPrepperServer.stop();
         peerForwarderServer.stop();
-        if(shutdownListener != null) {
-            shutdownListener.handleShutdown();
+        if(shutdownListeners != null) {
+            shutdownListeners.forEach(DataPrepperShutdownListener::handleShutdown);
         }
     }
 
@@ -125,11 +134,12 @@ public class DataPrepper implements PipelinesProvider {
      *
      * @param pipeline name of the pipeline
      */
-    public void shutdownPipelines(final String pipeline) {
+    public void shutdownPipeline(final String pipeline) {
         if (transformationPipelines.containsKey(pipeline)) {
             transformationPipelines.get(pipeline).shutdown();
         }
     }
+
     public PluginFactory getPluginFactory() {
         return pluginFactory;
     }
@@ -138,8 +148,12 @@ public class DataPrepper implements PipelinesProvider {
         return transformationPipelines;
     }
 
+    public PipelinesDataFlowModel getPipelinesDataFlowModel() {
+        return pipelinesDataFlowModel;
+    }
+
     public void registerShutdownHandler(final DataPrepperShutdownListener shutdownListener) {
-        this.shutdownListener = shutdownListener;
+        this.shutdownListeners.add(shutdownListener);
     }
 
     private class PipelinesObserver implements PipelineObserver {

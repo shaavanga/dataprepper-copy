@@ -10,6 +10,7 @@ import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.record.Record;
 
 import java.time.Duration;
+import java.util.Optional;
 
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -31,6 +32,18 @@ class BufferTest {
     }
 
     @Test
+    void testMaxRequestSize() {
+        final Buffer<Record<Event>> buffer = createObjectUnderTest();
+        assertEquals(buffer.getMaxRequestSize(), Optional.empty());
+    }
+
+    @Test
+    void testOptimalRequestSize() {
+        final Buffer<Record<Event>> buffer = createObjectUnderTest();
+        assertEquals(buffer.getOptimalRequestSize(), Optional.empty());
+    }
+
+    @Test
     void testShutdown() {
         final Buffer<Record<Event>> buffer = createObjectUnderTest();
         buffer.shutdown();
@@ -41,6 +54,7 @@ class BufferTest {
         final Buffer<Record<Event>> buffer = createObjectUnderTest();
 
         assertEquals(false, buffer.isByteBuffer());
+        assertEquals(false, buffer.areAcknowledgementsEnabled());
     }
 
     @Test

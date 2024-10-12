@@ -15,6 +15,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.opensearch.dataprepper.aws.api.AwsCredentialsOptions;
+import org.opensearch.dataprepper.aws.api.AwsCredentialsSupplier;
 import org.opensearch.dataprepper.model.CheckpointState;
 import org.opensearch.dataprepper.model.acknowledgements.AcknowledgementSet;
 import org.opensearch.dataprepper.model.acknowledgements.AcknowledgementSetManager;
@@ -57,6 +59,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.opensearch.dataprepper.plugins.kafka.buffer.ReadBufferHelper.awaitRead;
 
 @ExtendWith(MockitoExtension.class)
 public class KafkaBuffer_KmsIT {
@@ -71,6 +74,9 @@ public class KafkaBuffer_KmsIT {
     private AcknowledgementSetManager acknowledgementSetManager;
     @Mock
     private AcknowledgementSet acknowledgementSet;
+
+    @Mock
+    private AwsCredentialsSupplier awsCredentialsSupplier;
 
     private Random random;
 
@@ -121,10 +127,12 @@ public class KafkaBuffer_KmsIT {
         kmsClient = KmsClient.create();
 
         byteDecoder = null;
+
+        when(awsCredentialsSupplier.getProvider(any(AwsCredentialsOptions.class))).thenAnswer(options -> DefaultCredentialsProvider.create());
     }
 
     private KafkaBuffer createObjectUnderTest() {
-        return new KafkaBuffer(pluginSetting, kafkaBufferConfig, acknowledgementSetManager, null, ignored -> DefaultCredentialsProvider.create(), null);
+        return new KafkaBuffer(pluginSetting, kafkaBufferConfig, acknowledgementSetManager, null, awsCredentialsSupplier, null);
     }
 
     @Nested
@@ -170,7 +178,7 @@ public class KafkaBuffer_KmsIT {
             Record<Event> record = createRecord();
             objectUnderTest.write(record, 1_000);
 
-            Map.Entry<Collection<Record<Event>>, CheckpointState> readResult = objectUnderTest.read(10_000);
+            final Map.Entry<Collection<Record<Event>>, CheckpointState> readResult = awaitRead(objectUnderTest);
 
             assertThat(readResult, notNullValue());
             assertThat(readResult.getKey(), notNullValue());
@@ -209,7 +217,7 @@ public class KafkaBuffer_KmsIT {
 
             testProducer.publishRecord(keyData.toByteArray(), bufferedData.toByteArray());
 
-            final Map.Entry<Collection<Record<Event>>, CheckpointState> readResult = objectUnderTest.read(10_000);
+            final Map.Entry<Collection<Record<Event>>, CheckpointState> readResult = awaitRead(objectUnderTest);
 
             assertThat(readResult, notNullValue());
             assertThat(readResult.getKey(), notNullValue());

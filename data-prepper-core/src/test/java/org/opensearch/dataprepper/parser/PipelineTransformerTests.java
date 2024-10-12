@@ -13,34 +13,47 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Captor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.opensearch.dataprepper.TestDataProvider;
-import org.opensearch.dataprepper.model.breaker.CircuitBreaker;
+import org.opensearch.dataprepper.acknowledgements.DefaultAcknowledgementSetManager;
 import org.opensearch.dataprepper.breaker.CircuitBreakerManager;
+import org.opensearch.dataprepper.core.event.EventFactoryApplicationContextMarker;
+import org.opensearch.dataprepper.model.breaker.CircuitBreaker;
 import org.opensearch.dataprepper.model.buffer.Buffer;
+import org.opensearch.dataprepper.model.configuration.PipelineModel;
 import org.opensearch.dataprepper.model.configuration.PipelinesDataFlowModel;
 import org.opensearch.dataprepper.model.event.Event;
+import org.opensearch.dataprepper.model.event.EventFactory;
 import org.opensearch.dataprepper.model.plugin.PluginFactory;
 import org.opensearch.dataprepper.model.record.Record;
 import org.opensearch.dataprepper.parser.model.DataPrepperConfiguration;
 import org.opensearch.dataprepper.peerforwarder.PeerForwarderConfiguration;
 import org.opensearch.dataprepper.peerforwarder.PeerForwarderProvider;
 import org.opensearch.dataprepper.peerforwarder.PeerForwarderReceiveBuffer;
-import org.opensearch.dataprepper.event.DefaultEventFactory;
-import org.opensearch.dataprepper.acknowledgements.DefaultAcknowledgementSetManager;
 import org.opensearch.dataprepper.pipeline.Pipeline;
+import org.opensearch.dataprepper.pipeline.parser.PipelineConfigurationFileReader;
+import org.opensearch.dataprepper.pipeline.parser.PipelinesDataflowModelParser;
 import org.opensearch.dataprepper.pipeline.router.RouterFactory;
 import org.opensearch.dataprepper.plugin.DefaultPluginFactory;
 import org.opensearch.dataprepper.sourcecoordination.SourceCoordinatorFactory;
+import org.opensearch.dataprepper.validation.PluginError;
+import org.opensearch.dataprepper.validation.PluginErrorCollector;
+import org.opensearch.dataprepper.validation.PluginErrorsHandler;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
+import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Stream;
 
@@ -78,8 +91,14 @@ class PipelineTransformerTests {
     private SourceCoordinatorFactory sourceCoordinatorFactory;
     @Mock
     private CircuitBreakerManager circuitBreakerManager;
+    @Mock
+    private PluginErrorsHandler pluginErrorsHandler;
+    @Captor
+    private ArgumentCaptor<Collection<PluginError>> pluginErrorsArgumentCaptor;
 
-    private DefaultEventFactory eventFactory;
+    private PluginErrorCollector pluginErrorCollector;
+
+    private EventFactory eventFactory;
 
     private DefaultAcknowledgementSetManager acknowledgementSetManager;
 
@@ -88,19 +107,22 @@ class PipelineTransformerTests {
     @BeforeEach
     void setUp() {
         peerForwarderProvider = mock(PeerForwarderProvider.class);
-        eventFactory = mock(DefaultEventFactory.class);
+        eventFactory = mock(EventFactory.class);
         acknowledgementSetManager = mock(DefaultAcknowledgementSetManager.class);
+        pluginErrorCollector = new PluginErrorCollector();
         final AnnotationConfigApplicationContext publicContext = new AnnotationConfigApplicationContext();
         publicContext.refresh();
 
         final AnnotationConfigApplicationContext coreContext = new AnnotationConfigApplicationContext();
         coreContext.setParent(publicContext);
 
-        coreContext.scan(DefaultEventFactory.class.getPackage().getName());
+        coreContext.scan(EventFactoryApplicationContextMarker.class.getPackage().getName());
 
         coreContext.scan(DefaultAcknowledgementSetManager.class.getPackage().getName());
 
         coreContext.scan(DefaultPluginFactory.class.getPackage().getName());
+        coreContext.registerBean(PluginErrorCollector.class, () -> pluginErrorCollector);
+        coreContext.registerBean(PluginErrorsHandler.class, () -> pluginErrorsHandler);
         coreContext.registerBean(DataPrepperConfiguration.class, () -> dataPrepperConfiguration);
         coreContext.registerBean(PipelinesDataFlowModel.class, () -> pipelinesDataFlowModel);
         coreContext.refresh();
@@ -109,15 +131,19 @@ class PipelineTransformerTests {
 
     @AfterEach
     void tearDown() {
+        verify(dataPrepperConfiguration).getEventConfiguration();
         verifyNoMoreInteractions(dataPrepperConfiguration);
     }
 
     private PipelineTransformer createObjectUnderTest(final String pipelineConfigurationFileLocation) {
+
         final PipelinesDataFlowModel pipelinesDataFlowModel = new PipelinesDataflowModelParser(
-                pipelineConfigurationFileLocation).parseConfiguration();
-        return new PipelineTransformer(pipelinesDataFlowModel, pluginFactory, peerForwarderProvider,
-                                  routerFactory, dataPrepperConfiguration, circuitBreakerManager, eventFactory,
-                                  acknowledgementSetManager, sourceCoordinatorFactory);
+                new PipelineConfigurationFileReader(pipelineConfigurationFileLocation)).parseConfiguration();
+        return new PipelineTransformer(
+                pipelinesDataFlowModel, pluginFactory, peerForwarderProvider,
+                routerFactory, dataPrepperConfiguration, circuitBreakerManager, eventFactory,
+                acknowledgementSetManager, sourceCoordinatorFactory, pluginErrorCollector,
+                pluginErrorsHandler);
     }
 
     @Test
@@ -132,23 +158,100 @@ class PipelineTransformerTests {
     }
 
     @Test
+    void parseConfiguration_with_multiple_valid_pipelines_creates_the_correct_pipelineMap_with_acks() {
+        mockDataPrepperConfigurationAccesses();
+        final PipelineTransformer pipelineTransformer =
+                createObjectUnderTest(TestDataProvider.VALID_OFF_HEAP_FILE_WITH_ACKS);
+        final Map<String, Pipeline> actualPipelineMap = pipelineTransformer.transformConfiguration();
+        assertThat(actualPipelineMap.keySet(), equalTo(TestDataProvider.VALID_MULTIPLE_PIPELINE_NAMES));
+        verifyDataPrepperConfigurationAccesses(actualPipelineMap.keySet().size());
+        verify(dataPrepperConfiguration).getPipelineExtensions();
+
+        assertThat(actualPipelineMap, hasKey("test-pipeline-1"));
+        assertThat(actualPipelineMap, hasKey("test-pipeline-2"));
+        assertThat(actualPipelineMap, hasKey("test-pipeline-3"));
+        Pipeline pipeline = actualPipelineMap.get("test-pipeline-1");
+        assertThat(pipeline, notNullValue());
+        assertThat(pipeline.getBuffer(), CoreMatchers.not(instanceOf(CircuitBreakingBuffer.class)));
+        assertThat(pipeline.getBuffer().areAcknowledgementsEnabled(),equalTo(true));
+        pipeline = actualPipelineMap.get("test-pipeline-2");
+        assertThat(pipeline, notNullValue());
+        assertThat(pipeline.getSource().areAcknowledgementsEnabled(),equalTo(true));
+        pipeline = actualPipelineMap.get("test-pipeline-3");
+        assertThat(pipeline, notNullValue());
+        assertThat(pipeline.getSource().areAcknowledgementsEnabled(),equalTo(true));
+    }
+
+    @Test
+    void parseConfiguration_with_multiple_disconnected_valid_pipelines_creates_the_correct_pipelineMap_with_acks() {
+        mockDataPrepperConfigurationAccesses();
+        final PipelineTransformer pipelineTransformer =
+                createObjectUnderTest(TestDataProvider.DISCONNECTED_VALID_OFF_HEAP_FILE_WITH_ACKS);
+        final Map<String, Pipeline> actualPipelineMap = pipelineTransformer.transformConfiguration();
+        assertThat(actualPipelineMap.keySet(), equalTo(TestDataProvider.VALID_MULTIPLE_PIPELINE_NAMES));
+        verifyDataPrepperConfigurationAccesses(actualPipelineMap.keySet().size());
+        verify(dataPrepperConfiguration).getPipelineExtensions();
+
+        assertThat(actualPipelineMap, hasKey("test-pipeline-1"));
+        assertThat(actualPipelineMap, hasKey("test-pipeline-2"));
+        assertThat(actualPipelineMap, hasKey("test-pipeline-3"));
+        Pipeline pipeline = actualPipelineMap.get("test-pipeline-1");
+        assertThat(pipeline, notNullValue());
+        assertThat(pipeline.getBuffer(), CoreMatchers.not(instanceOf(CircuitBreakingBuffer.class)));
+        assertThat(pipeline.getBuffer().areAcknowledgementsEnabled(),equalTo(true));
+        pipeline = actualPipelineMap.get("test-pipeline-2");
+        assertThat(pipeline, notNullValue());
+        assertThat(pipeline.getSource().areAcknowledgementsEnabled(),equalTo(true));
+        pipeline = actualPipelineMap.get("test-pipeline-3");
+        assertThat(pipeline, notNullValue());
+        assertThat(pipeline.getSource().areAcknowledgementsEnabled(),equalTo(false));
+    }
+
+
+    @Test
     void parseConfiguration_with_invalid_root_pipeline_creates_empty_pipelinesMap() {
         final PipelineTransformer pipelineTransformer =
                 createObjectUnderTest(TestDataProvider.CONNECTED_PIPELINE_ROOT_SOURCE_INCORRECT);
         final Map<String, Pipeline> connectedPipelines = pipelineTransformer.transformConfiguration();
         assertThat(connectedPipelines.size(), equalTo(0));
         verify(dataPrepperConfiguration).getPipelineExtensions();
+        assertThat(pluginErrorCollector.getPluginErrors().size(), equalTo(1));
+        final PluginError pluginError = pluginErrorCollector.getPluginErrors().get(0);
+        assertThat(pluginError.getPipelineName(), equalTo("test-pipeline-1"));
+        assertThat(pluginError.getPluginName(), equalTo("file"));
+        assertThat(pluginError.getException(), notNullValue());
     }
 
-    @Test
-    void parseConfiguration_with_incorrect_child_pipeline_returns_empty_pipelinesMap() {
+    @ParameterizedTest
+    @ValueSource(strings = {
+            TestDataProvider.CONNECTED_PIPELINE_CHILD_PIPELINE_INCORRECT_DUE_TO_SINK,
+            TestDataProvider.CONNECTED_PIPELINE_CHILD_PIPELINE_INCORRECT_DUE_TO_PROCESSOR
+    })
+    void parseConfiguration_with_incorrect_child_pipeline_returns_empty_pipelinesMap(
+            final String pipelineConfigurationFileLocation) {
+        pluginErrorCollector.collectPluginError(
+                PluginError.builder()
+                        .componentType("non-pipeline-plugin")
+                        .pluginName("preexisting-plugin")
+                        .exception(new RuntimeException())
+                        .build());
         mockDataPrepperConfigurationAccesses();
-        final PipelineTransformer pipelineTransformer =
-                createObjectUnderTest(TestDataProvider.CONNECTED_PIPELINE_CHILD_PIPELINE_INCORRECT);
+        final PipelineTransformer pipelineTransformer = createObjectUnderTest(pipelineConfigurationFileLocation);
         final Map<String, Pipeline> connectedPipelines = pipelineTransformer.transformConfiguration();
         assertThat(connectedPipelines.size(), equalTo(0));
         verifyDataPrepperConfigurationAccesses();
         verify(dataPrepperConfiguration).getPipelineExtensions();
+        assertThat(pluginErrorCollector.getPluginErrors().size(), equalTo(2));
+        final PluginError pluginError = pluginErrorCollector.getPluginErrors().get(1);
+        assertThat(pluginError.getPipelineName(), equalTo("test-pipeline-2"));
+        assertThat(pluginError.getPluginName(), notNullValue());
+        assertThat(pluginError.getException(), notNullValue());
+        verify(pluginErrorsHandler).handleErrors(pluginErrorsArgumentCaptor.capture());
+        final Collection<PluginError> pluginErrorCollection = pluginErrorsArgumentCaptor.getValue();
+        assertThat(pluginErrorCollection.size(), equalTo(1));
+        final PluginError capturedPluginError = new ArrayList<>(pluginErrorCollection).get(0);
+        assertThat(Set.of(PipelineModel.PROCESSOR_PLUGIN_TYPE, PipelineModel.SINK_PLUGIN_TYPE)
+                .contains(capturedPluginError.getComponentType()), is(true));
     }
 
     @Test

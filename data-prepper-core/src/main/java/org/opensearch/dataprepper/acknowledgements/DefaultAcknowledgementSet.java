@@ -82,7 +82,7 @@ public class DefaultAcknowledgementSet implements AcknowledgementSet {
                 EventHandle eventHandle = event.getEventHandle();
                 if (eventHandle instanceof DefaultEventHandle) {
                     InternalEventHandle internalEventHandle = (InternalEventHandle)(DefaultEventHandle)eventHandle;
-                    internalEventHandle.setAcknowledgementSet(this);
+                    internalEventHandle.addAcknowledgementSet(this);
                     pendingAcknowledgments.put(eventHandle, new AtomicInteger(1));
                     totalEventsAdded.incrementAndGet();
                 }
@@ -161,8 +161,6 @@ public class DefaultAcknowledgementSet implements AcknowledgementSet {
         try {
             if (!pendingAcknowledgments.containsKey(eventHandle) ||
                 pendingAcknowledgments.get(eventHandle).get() == 0) {
-                LOG.warn("Unexpected event handle release");
-                metrics.increment(DefaultAcknowledgementSetMetrics.INVALID_RELEASES_METRIC_NAME);
                 return false;
             }
             if (pendingAcknowledgments.get(eventHandle).decrementAndGet() == 0) {

@@ -9,12 +9,12 @@ import io.micrometer.core.instrument.Counter;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.CheckpointState;
 import org.opensearch.dataprepper.model.buffer.Buffer;
-import org.opensearch.dataprepper.model.processor.Processor;
-import org.opensearch.dataprepper.model.record.Record;
+import org.opensearch.dataprepper.model.event.DefaultEventHandle;
 import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.event.EventHandle;
-import org.opensearch.dataprepper.model.event.DefaultEventHandle;
 import org.opensearch.dataprepper.model.event.InternalEventHandle;
+import org.opensearch.dataprepper.model.processor.Processor;
+import org.opensearch.dataprepper.model.record.Record;
 import org.opensearch.dataprepper.pipeline.common.FutureHelper;
 import org.opensearch.dataprepper.pipeline.common.FutureHelperResult;
 import org.slf4j.Logger;
@@ -23,7 +23,6 @@ import org.slf4j.LoggerFactory;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
-import java.util.ArrayList;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Future;
@@ -51,7 +50,7 @@ public class ProcessWorker implements Runnable {
         this.pipeline = pipeline;
         this.pluginMetrics = PluginMetrics.fromNames("ProcessWorker", pipeline.getName());
         this.invalidEventHandlesCounter = pluginMetrics.counter(INVALID_EVENT_HANDLES);
-        this.acknowledgementsEnabled = pipeline.getSource().areAcknowledgementsEnabled();
+        this.acknowledgementsEnabled = pipeline.getSource().areAcknowledgementsEnabled() || readBuffer.areAcknowledgementsEnabled();
     }
 
     @Override
@@ -61,37 +60,41 @@ public class ProcessWorker implements Runnable {
             while (!pipeline.isStopRequested()) {
                 doRun();
             }
-            LOG.info("Processor shutdown phase 1 complete.");
-
-            // Phase 2 - execute until buffers are empty
-            LOG.info("Beginning processor shutdown phase 2, iterating until buffers empty.");
-            while (!readBuffer.isEmpty()) {
-                doRun();
-            }
-            LOG.info("Processor shutdown phase 2 complete.");
-
-            // Phase 3 - execute until peer forwarder drain period expires (best effort to process all peer forwarder data)
-            final long drainTimeoutExpiration = System.currentTimeMillis() + pipeline.getPeerForwarderDrainTimeout().toMillis();
-            LOG.info("Beginning processor shutdown phase 3, iterating until {}.", drainTimeoutExpiration);
-            while (System.currentTimeMillis() < drainTimeoutExpiration) {
-                doRun();
-            }
-            LOG.info("Processor shutdown phase 3 complete.");
-
-            // Phase 4 - prepare processors for shutdown
-            LOG.info("Beginning processor shutdown phase 4, preparing processors for shutdown.");
-            processors.forEach(Processor::prepareForShutdown);
-            LOG.info("Processor shutdown phase 4 complete.");
-
-            // Phase 5 - execute until processors are ready to shutdown
-            LOG.info("Beginning processor shutdown phase 5, iterating until processors are ready to shutdown.");
-            while (!areComponentsReadyForShutdown()) {
-                doRun();
-            }
-            LOG.info("Processor shutdown phase 5 complete.");
+            executeShutdownProcess();
         } catch (final Exception e) {
             LOG.error("Encountered exception during pipeline {} processing", pipeline.getName(), e);
         }
+    }
+
+    private void executeShutdownProcess() {
+        LOG.info("Processor shutdown phase 1 complete.");
+
+        // Phase 2 - execute until buffers are empty
+        LOG.info("Beginning processor shutdown phase 2, iterating until buffers empty.");
+        while (!isBufferReadyForShutdown()) {
+            doRun();
+        }
+        LOG.info("Processor shutdown phase 2 complete.");
+
+        // Phase 3 - execute until peer forwarder drain period expires (best effort to process all peer forwarder data)
+        final long drainTimeoutExpiration = System.currentTimeMillis() + pipeline.getPeerForwarderDrainTimeout().toMillis();
+        LOG.info("Beginning processor shutdown phase 3, iterating until {}.", drainTimeoutExpiration);
+        while (System.currentTimeMillis() < drainTimeoutExpiration) {
+            doRun();
+        }
+        LOG.info("Processor shutdown phase 3 complete.");
+
+        // Phase 4 - prepare processors for shutdown
+        LOG.info("Beginning processor shutdown phase 4, preparing processors for shutdown.");
+        processors.forEach(Processor::prepareForShutdown);
+        LOG.info("Processor shutdown phase 4 complete.");
+
+        // Phase 5 - execute until processors are ready to shutdown
+        LOG.info("Beginning processor shutdown phase 5, iterating until processors are ready to shutdown.");
+        while (!areComponentsReadyForShutdown()) {
+            doRun();
+        }
+        LOG.info("Processor shutdown phase 5 complete.");
     }
 
     private void processAcknowledgements(List<Event> inputEvents, Collection<Record<Event>> outputRecords) {
@@ -101,7 +104,7 @@ public class ProcessWorker implements Runnable {
             EventHandle eventHandle = event.getEventHandle();
             if (eventHandle != null && eventHandle instanceof DefaultEventHandle) {
                 InternalEventHandle internalEventHandle = (InternalEventHandle)(DefaultEventHandle)eventHandle;
-                if (internalEventHandle.getAcknowledgementSet() != null && !outputEventsSet.contains(event)) {
+                if (!outputEventsSet.contains(event)) {
                     eventHandle.release(true);
                 }
             } else if (eventHandle != null) {
@@ -129,7 +132,7 @@ public class ProcessWorker implements Runnable {
 
             List<Event> inputEvents = null;
             if (acknowledgementsEnabled) {
-                inputEvents = ((ArrayList<Record<Event>>) records).stream().map(Record::getData).collect(Collectors.toList());
+                inputEvents = ((List<Record<Event>>) records).stream().map(Record::getData).collect(Collectors.toList());
             }
 
             try {
@@ -154,9 +157,17 @@ public class ProcessWorker implements Runnable {
     }
 
     private boolean areComponentsReadyForShutdown() {
-        return readBuffer.isEmpty() && processors.stream()
+        return isBufferReadyForShutdown() && processors.stream()
                 .map(Processor::isReadyForShutdown)
                 .allMatch(result -> result == true);
+    }
+
+    private boolean isBufferReadyForShutdown() {
+        final boolean isBufferEmpty = readBuffer.isEmpty();
+        final boolean forceStopReadingBuffers = pipeline.isForceStopReadingBuffers();
+        final boolean isBufferReadyForShutdown = isBufferEmpty || forceStopReadingBuffers;
+        LOG.debug("isBufferReadyForShutdown={}, isBufferEmpty={}, forceStopReadingBuffers={}", isBufferReadyForShutdown, isBufferEmpty, forceStopReadingBuffers);
+        return isBufferReadyForShutdown;
     }
 
     /**

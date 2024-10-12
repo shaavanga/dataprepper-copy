@@ -15,12 +15,14 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.opensearch.dataprepper.expression.antlr.DataPrepperExpressionParser;
 import org.opensearch.dataprepper.expression.util.TestObject;
 import org.opensearch.dataprepper.model.event.Event;
 
+import java.math.BigDecimal;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -110,6 +112,31 @@ class ParseTreeCoercionServiceTest {
         final Object result = objectUnderTest.coercePrimaryTerminalNode(terminalNode, testEvent);
         assertThat(result, instanceOf(Float.class));
         assertThat(result, equalTo(testFloat));
+    }
+
+    @Test
+    void testCoerceTerminalNodeBigDecimalType() {
+        when(token.getType()).thenReturn(DataPrepperExpressionParser.JsonPointer);
+        final BigDecimal testBigDecimal = new BigDecimal(new Random().nextFloat());
+        when(terminalNode.getSymbol()).thenReturn(token);
+        when(terminalNode.getText()).thenReturn("/key");
+
+        final Event testEvent = createTestEvent(Map.of("key", testBigDecimal));
+        final Object result = objectUnderTest.coercePrimaryTerminalNode(terminalNode, testEvent);
+        assertThat(result, instanceOf(BigDecimal.class));
+        assertThat(result, equalTo(testBigDecimal));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings={"integer", "boolean", "long", "string", "double", "map", "array"})
+    void testCoerceTerminalNodeDataTypesType(String testString) {
+        when(token.getType()).thenReturn(DataPrepperExpressionParser.DataTypes);
+        when(terminalNode.getSymbol()).thenReturn(token);
+        when(terminalNode.getText()).thenReturn(testString);
+        final Event testEvent = createTestEvent(new HashMap<>());
+        final Object result = objectUnderTest.coercePrimaryTerminalNode(terminalNode, testEvent);
+        assertThat(result, instanceOf(String.class));
+        assertThat(result, equalTo(testString));
     }
 
     @Test

@@ -9,6 +9,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.opensearch.dataprepper.DataPrepperShutdownOptions;
 import org.opensearch.dataprepper.model.acknowledgements.AcknowledgementSetManager;
 import org.opensearch.dataprepper.model.acknowledgements.AcknowledgementSet;
 import org.opensearch.dataprepper.model.buffer.Buffer;
@@ -30,8 +31,8 @@ import org.opensearch.dataprepper.pipeline.common.TestProcessor;
 import org.opensearch.dataprepper.pipeline.router.Router;
 import org.opensearch.dataprepper.pipeline.router.RouterCopyRecordStrategy;
 import org.opensearch.dataprepper.pipeline.router.RouterGetRecordStrategy;
-import org.opensearch.dataprepper.plugins.TestSink;
-import org.opensearch.dataprepper.plugins.TestSource;
+import org.opensearch.dataprepper.plugins.test.TestSink;
+import org.opensearch.dataprepper.plugins.test.TestSource;
 import org.opensearch.dataprepper.plugins.TestSourceWithCoordination;
 import org.opensearch.dataprepper.plugins.TestSourceWithEnhancedCoordination;
 import org.opensearch.dataprepper.plugins.buffer.blockingbuffer.BlockingBuffer;
@@ -93,9 +94,9 @@ class PipelineTests {
         eventFactory = mock(EventFactory.class);
         acknowledgementSetManager = mock(AcknowledgementSetManager.class);
         sourceCoordinatorFactory = mock(SourceCoordinatorFactory.class);
-        processorShutdownTimeout = Duration.ofSeconds(Math.abs(new Random().nextInt(10)));
-        sinkShutdownTimeout = Duration.ofSeconds(Math.abs(new Random().nextInt(10)));
-        peerForwarderDrainTimeout = Duration.ofSeconds(Math.abs(new Random().nextInt(10)));
+        processorShutdownTimeout = Duration.ofMillis(Math.abs(new Random().nextInt(10)));
+        sinkShutdownTimeout = Duration.ofMillis(Math.abs(new Random().nextInt(10)));
+        peerForwarderDrainTimeout = Duration.ofMillis(Math.abs(new Random().nextInt(10)));
     }
 
     @AfterEach
@@ -441,7 +442,7 @@ class PipelineTests {
             Pipeline pipeline = createObjectUnderTest();
             when(mockSource.areAcknowledgementsEnabled()).thenReturn(true);
             pipeline.publishToSinks(records);
-            verify(acknowledgementSetManager).acquireEventReference(any(DefaultEventHandle.class));
+            verify(eventHandle).acquireReference();
 
             verify(router)
                     .route(anyCollection(), eq(dataFlowComponents), any(RouterGetRecordStrategy.class), any(BiConsumer.class));
@@ -619,5 +620,34 @@ class PipelineTests {
 
         testPipeline.shutdown();
         verifyNoInteractions(pipelineObserver);
+    }
+
+    @Test
+    void isForceStopReadingBuffers_returns_false_if_not_in_shutdown() {
+        final Source<Record<String>> testSource = new TestSource();
+        final DataFlowComponent<Sink> sinkDataFlowComponent = mock(DataFlowComponent.class);
+        final TestSink testSink = new TestSink();
+        when(sinkDataFlowComponent.getComponent()).thenReturn(testSink);
+        testPipeline = new Pipeline(TEST_PIPELINE_NAME, testSource, new BlockingBuffer(TEST_PIPELINE_NAME),
+                Collections.emptyList(), Collections.singletonList(sinkDataFlowComponent), router,
+                eventFactory, acknowledgementSetManager, sourceCoordinatorFactory, TEST_PROCESSOR_THREADS, TEST_READ_BATCH_TIMEOUT,
+                processorShutdownTimeout, sinkShutdownTimeout, peerForwarderDrainTimeout);
+        assertThat(testPipeline.isForceStopReadingBuffers(), equalTo(false));
+    }
+
+    @Test
+    void isForceStopReadingBuffers_returns_true_if_bufferReadTimeout_is_exceeded() throws InterruptedException {
+        final Source<Record<String>> testSource = new TestSource();
+        final DataFlowComponent<Sink> sinkDataFlowComponent = mock(DataFlowComponent.class);
+        final TestSink testSink = new TestSink();
+        when(sinkDataFlowComponent.getComponent()).thenReturn(testSink);
+        testPipeline = new Pipeline(TEST_PIPELINE_NAME, testSource, new BlockingBuffer(TEST_PIPELINE_NAME),
+                Collections.emptyList(), Collections.singletonList(sinkDataFlowComponent), router,
+                eventFactory, acknowledgementSetManager, sourceCoordinatorFactory, TEST_PROCESSOR_THREADS, TEST_READ_BATCH_TIMEOUT,
+                processorShutdownTimeout, sinkShutdownTimeout, peerForwarderDrainTimeout);
+
+        testPipeline.shutdown(DataPrepperShutdownOptions.builder().withBufferReadTimeout(Duration.ofMillis(1)).build());
+        Thread.sleep(2);
+        assertThat(testPipeline.isForceStopReadingBuffers(), is(true));
     }
 }

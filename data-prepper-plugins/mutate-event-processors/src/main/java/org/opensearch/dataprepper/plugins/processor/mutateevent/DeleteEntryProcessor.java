@@ -6,10 +6,14 @@
 package org.opensearch.dataprepper.plugins.processor.mutateevent;
 
 import org.opensearch.dataprepper.expression.ExpressionEvaluator;
+import static org.opensearch.dataprepper.logging.DataPrepperMarkers.EVENT;
+import static org.opensearch.dataprepper.logging.DataPrepperMarkers.NOISY;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPlugin;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPluginConstructor;
 import org.opensearch.dataprepper.model.event.Event;
+import org.opensearch.dataprepper.model.event.EventKey;
+import org.opensearch.dataprepper.model.plugin.InvalidPluginConfigurationException;
 import org.opensearch.dataprepper.model.processor.AbstractProcessor;
 import org.opensearch.dataprepper.model.processor.Processor;
 import org.opensearch.dataprepper.model.record.Record;
@@ -17,15 +21,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Collection;
+import java.util.List;
 import java.util.Objects;
-
-import static org.opensearch.dataprepper.logging.DataPrepperMarkers.EVENT;
 
 @DataPrepperPlugin(name = "delete_entries", pluginType = Processor.class, pluginConfigurationType = DeleteEntryProcessorConfig.class)
 public class DeleteEntryProcessor extends AbstractProcessor<Record<Event>, Record<Event>> {
 
     private static final Logger LOG = LoggerFactory.getLogger(DeleteEntryProcessor.class);
-    private final String[] entries;
+    private final List<EventKey> entries;
     private final String deleteWhen;
 
     private final ExpressionEvaluator expressionEvaluator;
@@ -36,6 +39,12 @@ public class DeleteEntryProcessor extends AbstractProcessor<Record<Event>, Recor
         this.entries = config.getWithKeys();
         this.deleteWhen = config.getDeleteWhen();
         this.expressionEvaluator = expressionEvaluator;
+
+        if (deleteWhen != null
+                    && !expressionEvaluator.isValidExpressionStatement(deleteWhen)) {
+                throw new InvalidPluginConfigurationException(
+                        String.format("delete_when %s is not a valid expression statement. See https://opensearch.org/docs/latest/data-prepper/pipelines/expression-syntax/ for valid expression syntax", deleteWhen));
+        }
     }
 
     @Override
@@ -49,11 +58,17 @@ public class DeleteEntryProcessor extends AbstractProcessor<Record<Event>, Recor
                 }
 
 
-                for (String entry : entries) {
+                for (final EventKey entry : entries) {
                     recordEvent.delete(entry);
                 }
             } catch (final Exception e) {
-                LOG.error(EVENT, "There was an exception while processing Event [{}]", recordEvent, e);
+                LOG.atError()
+                        .addMarker(EVENT)
+                        .addMarker(NOISY)
+                        .setMessage("There was an exception while processing Event [{}]")
+                        .addArgument(recordEvent)
+                        .setCause(e)
+                        .log();
             }
         }
 

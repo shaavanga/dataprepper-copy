@@ -51,6 +51,9 @@ While not necessary, a great way to set up the Aggregate Processor [identificati
 ### <a name="when"></a>
 * `when` (Optional): A `String` that represents a condition that must be evaluated to true for the aggregation to be applied on the event. Events that do not evaluate to true on the condition are skipped. Default is no condition which means all events are included in the aggregation.
 
+### <a name="local_mode"></a>
+* `local_mode` (Optional): A `Boolean` indicating if the aggregation should be done local to node instead of forwarding to remote peers.
+
 ## Available Aggregate Actions
 
 ### <a name="remove_duplicates"></a>

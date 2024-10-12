@@ -18,6 +18,7 @@ import software.amazon.awssdk.enhanced.dynamodb.Expression;
 import software.amazon.awssdk.enhanced.dynamodb.Key;
 import software.amazon.awssdk.enhanced.dynamodb.TableSchema;
 import software.amazon.awssdk.enhanced.dynamodb.model.CreateTableEnhancedRequest;
+import software.amazon.awssdk.enhanced.dynamodb.model.DeleteItemEnhancedRequest;
 import software.amazon.awssdk.enhanced.dynamodb.model.EnhancedGlobalSecondaryIndex;
 import software.amazon.awssdk.enhanced.dynamodb.model.GetItemEnhancedRequest;
 import software.amazon.awssdk.enhanced.dynamodb.model.Page;
@@ -145,7 +146,9 @@ public class DynamoDbClientWrapper {
             return false;
         } catch (final Exception e) {
             LOG.error("An exception occurred while attempting to create a DynamoDb partition item {}", dynamoDbSourcePartitionItem.getSourcePartitionKey());
-            return false;
+            throw new PartitionUpdateException(
+                    "Exception when trying to create partition item " + dynamoDbSourcePartitionItem.getSourcePartitionKey(),
+                    e);
         }
     }
 
@@ -186,6 +189,26 @@ public class DynamoDbClientWrapper {
         } catch (final Exception e) {
             final String errorMessage = String.format("An exception occurred while attempting to update a DynamoDb partition item %s",
                     dynamoDbSourcePartitionItem.getSourcePartitionKey());
+            LOG.error(errorMessage, e);
+            throw new PartitionUpdateException(errorMessage, e);
+        }
+    }
+
+    public void tryDeletePartitionItem(final DynamoDbSourcePartitionItem dynamoDbSourcePartitionItem) {
+        dynamoDbSourcePartitionItem.setVersion(dynamoDbSourcePartitionItem.getVersion() + 1L);
+
+        try {
+            table.deleteItem(DeleteItemEnhancedRequest.builder()
+                    .key(Key.builder().partitionValue(dynamoDbSourcePartitionItem.getSourceIdentifier()).sortValue(dynamoDbSourcePartitionItem.getSourcePartitionKey()).build())
+                    .conditionExpression(Expression.builder()
+                            .expression(ITEM_EXISTS_AND_HAS_LATEST_VERSION)
+                            .expressionValues(Map.of(":v", AttributeValue.builder().n(String.valueOf(dynamoDbSourcePartitionItem.getVersion() - 1L)).build()))
+                            .build())
+                    .build());
+        } catch (final Exception e) {
+            final String errorMessage = String.format("An exception occurred while attempting to delete a DynamoDb partition item %s",
+                    dynamoDbSourcePartitionItem.getSourcePartitionKey());
+
             LOG.error(errorMessage, e);
             throw new PartitionUpdateException(errorMessage, e);
         }
@@ -284,6 +307,25 @@ public class DynamoDbClientWrapper {
             }
         } catch (final Exception e) {
             LOG.error("An exception occurred while attempting to query partition items with {} due to {}", sourceStatusCombinationKey, e);
+        }
+
+        return result;
+    }
+
+    public List<SourcePartitionStoreItem> queryAllPartitions(final String sourceIdentifier) {
+        List<SourcePartitionStoreItem> result = new ArrayList<>();
+        try {
+            final QueryEnhancedRequest queryEnhancedRequest = QueryEnhancedRequest.builder()
+                    .limit(DEFAULT_QUERY_LIMIT)
+                    .queryConditional(QueryConditional.keyEqualTo(Key.builder().partitionValue(sourceIdentifier).build()))
+                    .build();
+
+            final SdkIterable<Page<DynamoDbSourcePartitionItem>> availableItems = table.query(queryEnhancedRequest);
+            for (final Page<DynamoDbSourcePartitionItem> page : availableItems) {
+                result.addAll(page.items());
+            }
+        } catch (final Exception e) {
+            LOG.error("An exception occurred while attempting to query all partition items with identifier {}", sourceIdentifier, e);
         }
 
         return result;

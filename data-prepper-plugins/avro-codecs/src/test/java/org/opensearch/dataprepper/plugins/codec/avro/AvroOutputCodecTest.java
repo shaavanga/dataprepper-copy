@@ -16,8 +16,9 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.opensearch.dataprepper.event.TestEventFactory;
 import org.opensearch.dataprepper.model.event.Event;
-import org.opensearch.dataprepper.model.log.JacksonLog;
+import org.opensearch.dataprepper.model.event.LogEventBuilder;
 import org.opensearch.dataprepper.model.plugin.InvalidPluginConfigurationException;
 import org.opensearch.dataprepper.model.sink.OutputCodecContext;
 
@@ -75,7 +76,6 @@ public class AvroOutputCodecTest {
         RuntimeException actualException = assertThrows(RuntimeException.class, this::createObjectUnderTest);
 
         assertThat(actualException.getMessage(), notNullValue());
-        assertThat(actualException.getMessage(), containsString(invalidSchema));
         assertThat(actualException.getMessage(), containsString("was expecting comma"));
     }
 
@@ -390,7 +390,7 @@ public class AvroOutputCodecTest {
     }
 
     private static Event createEventRecord(final Map<String, Object> eventData) {
-        return JacksonLog.builder().withData(eventData).build();
+        return TestEventFactory.getTestEventFactory().eventBuilder(LogEventBuilder.class).withData(eventData).build();
     }
 
     private static List<Map<String, Object>> generateRecords(final int numberOfRecords) {

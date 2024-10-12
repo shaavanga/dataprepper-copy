@@ -32,6 +32,7 @@ import org.opensearch.dataprepper.plugins.kafka.consumer.KafkaCustomConsumer;
 import org.opensearch.dataprepper.plugins.kafka.consumer.KafkaCustomConsumerFactory;
 import org.opensearch.dataprepper.plugins.kafka.producer.KafkaCustomProducer;
 import org.opensearch.dataprepper.plugins.kafka.producer.KafkaCustomProducerFactory;
+import org.opensearch.dataprepper.plugins.kafka.configuration.KafkaProducerProperties;
 import org.opensearch.dataprepper.plugins.kafka.service.TopicServiceFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -41,6 +42,7 @@ import java.time.Duration;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -70,7 +72,7 @@ public class KafkaBuffer extends AbstractBuffer<Record<Event>> {
                        final AcknowledgementSetManager acknowledgementSetManager,
                        final ByteDecoder byteDecoder, final AwsCredentialsSupplier awsCredentialsSupplier,
                        final CircuitBreaker circuitBreaker) {
-        super(kafkaBufferConfig.getCustomMetricPrefix().orElse(pluginSetting.getName()), pluginSetting.getPipelineName());
+        super(kafkaBufferConfig.getCustomMetricPrefix().orElse(pluginSetting.getName()+"buffer"), pluginSetting.getPipelineName());
         final SerializationFactory serializationFactory = new BufferSerializationFactory(new CommonSerializationFactory());
         final KafkaCustomProducerFactory kafkaCustomProducerFactory = new KafkaCustomProducerFactory(serializationFactory, awsCredentialsSupplier, new TopicServiceFactory());
         this.byteDecoder = byteDecoder;
@@ -88,6 +90,16 @@ public class KafkaBuffer extends AbstractBuffer<Record<Event>> {
         consumers.forEach(this.executorService::submit);
 
         this.drainTimeout = kafkaBufferConfig.getDrainTimeout();
+    }
+
+    @Override
+    public Optional<Integer> getMaxRequestSize() {
+        return Optional.of(producer.getMaxRequestSize());
+    }
+
+    @Override
+    public Optional<Integer> getOptimalRequestSize() {
+        return Optional.of(KafkaProducerProperties.DEFAULT_MAX_REQUEST_SIZE);
     }
 
     @Override
@@ -131,6 +143,11 @@ public class KafkaBuffer extends AbstractBuffer<Record<Event>> {
     }
 
     @Override
+    public boolean areAcknowledgementsEnabled() {
+        return true;
+    }
+
+    @Override
     public void doWriteAll(Collection<Record<Event>> records, int timeoutInMillis) throws Exception {
         for (Record<Event> record : records) {
             doWrite(record, timeoutInMillis);
@@ -141,7 +158,11 @@ public class KafkaBuffer extends AbstractBuffer<Record<Event>> {
     public Map.Entry<Collection<Record<Event>>, CheckpointState> doRead(int timeoutInMillis) {
         try {
             setMdc();
-            return innerBuffer.read(timeoutInMillis);
+            Map.Entry<Collection<Record<Event>>, CheckpointState> result =  innerBuffer.read(timeoutInMillis);
+            if (result != null) {
+                updateLatency(result.getKey());
+            }
+            return result;
         } finally {
             resetMdc();
         }
@@ -162,7 +183,7 @@ public class KafkaBuffer extends AbstractBuffer<Record<Event>> {
     public void doCheckpoint(CheckpointState checkpointState) {
         try {
             setMdc();
-            innerBuffer.doCheckpoint(checkpointState);
+            innerBuffer.checkpoint(checkpointState);
         } finally {
             resetMdc();
         }
@@ -186,6 +207,10 @@ public class KafkaBuffer extends AbstractBuffer<Record<Event>> {
     @Override
     public boolean isWrittenOffHeapOnly() {
         return true;
+    }
+
+    int getInnerBufferRecordsInFlight() {
+        return innerBuffer.getRecordsInFlight();
     }
 
     @Override

@@ -5,16 +5,26 @@
 
 package org.opensearch.dataprepper.plugins.processor.parse.json;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.Counter;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.opensearch.dataprepper.expression.ExpressionEvaluator;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.event.Event;
-import org.opensearch.dataprepper.model.event.JacksonEvent;
+import org.opensearch.dataprepper.model.plugin.InvalidPluginConfigurationException;
 import org.opensearch.dataprepper.model.record.Record;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.opensearch.dataprepper.event.TestEventFactory;
+import org.opensearch.dataprepper.event.TestEventKeyFactory;
+import org.opensearch.dataprepper.model.event.EventBuilder;
+import org.opensearch.dataprepper.model.event.EventFactory;
+import org.opensearch.dataprepper.model.event.EventKeyFactory;
+import org.opensearch.dataprepper.model.event.HandleFailedEventsOption;
 import org.opensearch.dataprepper.plugins.processor.parse.AbstractParseProcessor;
 import org.opensearch.dataprepper.plugins.processor.parse.CommonParseConfig;
 
@@ -29,12 +39,19 @@ import java.util.UUID;
 import static java.util.Map.entry;
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 public class ParseJsonProcessorTest {
     private static final String DEEPLY_NESTED_KEY_NAME = "base";
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     protected CommonParseConfig processorConfig;
 
@@ -47,7 +64,18 @@ public class ParseJsonProcessorTest {
     @Mock
     protected ExpressionEvaluator expressionEvaluator;
 
+    @Mock
+    protected HandleFailedEventsOption handleFailedEventsOption;
+
+    @Mock
+    protected Counter processingFailuresCounter;
+
+    @Mock
+    protected Counter parseErrorsCounter;
+
     protected AbstractParseProcessor parseJsonProcessor;
+    private final EventFactory testEventFactory = TestEventFactory.getTestEventFactory();
+    protected final EventKeyFactory testEventKeyFactory = TestEventKeyFactory.getTestEventFactory();
 
     @BeforeEach
     public void setup() {
@@ -58,10 +86,26 @@ public class ParseJsonProcessorTest {
         when(processorConfig.getPointer()).thenReturn(defaultConfig.getPointer());
         when(processorConfig.getParseWhen()).thenReturn(null);
         when(processorConfig.getOverwriteIfDestinationExists()).thenReturn(true);
+
+        when(pluginMetrics.counter("recordsIn")).thenReturn(mock(Counter.class));
+        when(pluginMetrics.counter("recordsOut")).thenReturn(mock(Counter.class));
+        when(pluginMetrics.counter("processingFailures")).thenReturn(processingFailuresCounter);
+        lenient().when(pluginMetrics.counter("parseErrors")).thenReturn(parseErrorsCounter);
+        when(processorConfig.getHandleFailedEventsOption()).thenReturn(handleFailedEventsOption);
     }
 
     protected AbstractParseProcessor createObjectUnderTest() {
-        return new ParseJsonProcessor(pluginMetrics, jsonProcessorConfig, expressionEvaluator);
+        return new ParseJsonProcessor(pluginMetrics, jsonProcessorConfig, expressionEvaluator, testEventKeyFactory);
+    }
+
+    @Test
+    void invalid_parse_when_throws_InvalidPluginConfigurationException() {
+        final String parseWhen = UUID.randomUUID().toString();
+
+        when(processorConfig.getParseWhen()).thenReturn(parseWhen);
+        when(expressionEvaluator.isValidExpressionStatement(parseWhen)).thenReturn(false);
+
+        assertThrows(InvalidPluginConfigurationException.class, this::createObjectUnderTest);
     }
 
     @Test
@@ -80,7 +124,74 @@ public class ParseJsonProcessorTest {
         assertThat(parsedEvent.containsKey(destination), equalTo(true));
 
         assertThatFirstMapIsSubsetOfSecondMap(data, parsedEvent.get(destination, Map.class));
+
+        verifyNoInteractions(processingFailuresCounter);
+        verifyNoInteractions(parseErrorsCounter);
+        verifyNoInteractions(handleFailedEventsOption);
     }
+
+    @Test
+    void test_simple_depth_value_1() throws Exception {
+        final String source = "root_source";
+        when(processorConfig.getSource()).thenReturn(source);
+        when(processorConfig.getDestination()).thenReturn(source);
+        when(processorConfig.getDepth()).thenReturn(1);
+        parseJsonProcessor = createObjectUnderTest(); // need to recreate so that new config options are used
+	
+	Map<String, Object> data = Map.of("key1", "value1", "key2", 1, "key3", Map.of("key5", Map.of("key6", "value6")));
+	Map<String, Object> expectedResult = Map.of("key1", "value1", "key2", 1, "key3", "{\"key5\":{\"key6\":\"value6\"}}");
+        final String serializedMessage = objectMapper.writeValueAsString(data);
+        final Event parsedEvent = createAndParseMessageEvent(serializedMessage);
+        assertThatKeyEquals(parsedEvent, source, expectedResult);
+    }
+
+    @Test
+    void test_simple_depth_value_2() throws Exception {
+        final String source = "root_source";
+        when(processorConfig.getSource()).thenReturn(source);
+        when(processorConfig.getDestination()).thenReturn(source);
+        when(processorConfig.getDepth()).thenReturn(2);
+        parseJsonProcessor = createObjectUnderTest(); // need to recreate so that new config options are used
+	
+	Map<String, Object> data = Map.of("key1", "value1", "key2", 1, "key3", Map.of("key4", 4, "key5", Map.of("key6", "value6")));
+	Map<String, Object> expectedResult = Map.of("key1", "value1", "key2", 1, "key3", Map.of("key4", 4, "key5", "{\"key6\":\"value6\"}"));
+        final String serializedMessage = objectMapper.writeValueAsString(data);
+        final Event parsedEvent = createAndParseMessageEvent(serializedMessage);
+        assertThatKeyEquals(parsedEvent, source, expectedResult);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0,1,2,3,4,5,6,7,8,9,10})
+    void test_depth_option_with_same_source_and_destination(int depth) throws Exception {
+        final String source = "root_source";
+        when(processorConfig.getSource()).thenReturn(source);
+        when(processorConfig.getDestination()).thenReturn(source);
+        when(processorConfig.getDepth()).thenReturn(depth);
+        parseJsonProcessor = createObjectUnderTest(); // need to recreate so that new config options are used
+
+        Map<String, Object> mapValue = new HashMap<>();
+        Map<String, Object> prevMap = null;
+        Object expectedResult = null;
+        // Create a map with 12 nested levels
+        for (int i = 11; i >= 0; i--) {
+            Map<String, Object> m = (prevMap == null) ?
+                    Map.of("key" + i, i, "key" + (100 + i), "value" + i) :
+                    Map.of("key" + i, i, "key" + (100 + i), "value" + i, "key"+(1000+i), prevMap);
+            if (i == depth) {
+                expectedResult = (depth == 0) ? m : objectMapper.writeValueAsString(m);
+            } else if (i < depth) {
+                expectedResult = Map.of("key" + i, i, "key" + (100 + i), "value" + i, "key"+(1000+i), expectedResult);
+            }
+            prevMap = m;
+        }
+
+        mapValue = prevMap;
+        final String serializedMessage = objectMapper.writeValueAsString(mapValue);
+        final Event parsedEvent = createAndParseMessageEvent(serializedMessage);
+        assertThatKeyEquals(parsedEvent, source, expectedResult);
+
+    }
+
 
     @Test
     void test_when_dataFieldEqualToRootField_then_overwritesOriginalFields() {
@@ -98,6 +209,10 @@ public class ParseJsonProcessorTest {
 
         assertThatKeyEquals(parsedEvent, source, "value_that_will_overwrite_source");
         assertThatKeyEquals(parsedEvent, "key", "value");
+
+        verifyNoInteractions(processingFailuresCounter);
+        verifyNoInteractions(parseErrorsCounter);
+        verifyNoInteractions(handleFailedEventsOption);
     }
 
     @Test
@@ -113,6 +228,10 @@ public class ParseJsonProcessorTest {
         final Event parsedEvent = createAndParseMessageEvent(serializedMessage);
 
         assertThatKeyEquals(parsedEvent, source, "{\"root_source\":\"value_that_will_not_be_overwritten\"}");
+
+        verifyNoInteractions(processingFailuresCounter);
+        verifyNoInteractions(parseErrorsCounter);
+        verifyNoInteractions(handleFailedEventsOption);
     }
 
     @Test
@@ -130,6 +249,10 @@ public class ParseJsonProcessorTest {
 
         assertThatKeyEquals(parsedEvent, source, "{\"key\":\"value\"}");
         assertThat(parsedEvent.containsKey("key"), equalTo(false));
+
+        verifyNoInteractions(processingFailuresCounter);
+        verifyNoInteractions(parseErrorsCounter);
+        verifyNoInteractions(handleFailedEventsOption);
     }
 
     @Test
@@ -143,6 +266,8 @@ public class ParseJsonProcessorTest {
 
         assertThatKeyEquals(parsedEvent, processorConfig.getSource(), serializedMessage);
         assertThat(parsedEvent.toMap().size(), equalTo(1));
+
+        verify(parseErrorsCounter).increment();
     }
 
     @Test
@@ -158,6 +283,10 @@ public class ParseJsonProcessorTest {
         assertThatKeyEquals(parsedEvent, DEEPLY_NESTED_KEY_NAME, messageMap.get(DEEPLY_NESTED_KEY_NAME));
         final String jsonPointerToValue = constructDeeplyNestedJsonPointer(numberOfLayers);
         assertThat(parsedEvent.get(jsonPointerToValue, String.class), equalTo("value"));
+
+        verifyNoInteractions(processingFailuresCounter);
+        verifyNoInteractions(parseErrorsCounter);
+        verifyNoInteractions(handleFailedEventsOption);
     }
 
     @Test
@@ -177,6 +306,10 @@ public class ParseJsonProcessorTest {
         final String jsonPointerToValue = destination + constructDeeplyNestedJsonPointer(numberOfLayers);
 
         assertThat(parsedEvent.get(jsonPointerToValue, String.class), equalTo("value"));
+
+        verifyNoInteractions(processingFailuresCounter);
+        verifyNoInteractions(parseErrorsCounter);
+        verifyNoInteractions(handleFailedEventsOption);
     }
 
     @Test
@@ -192,6 +325,30 @@ public class ParseJsonProcessorTest {
         assertThat(parsedEvent.get(key, ArrayList.class), equalTo(value));
         final String pointerToFirstElement = key + "/0";
         assertThat(parsedEvent.get(pointerToFirstElement, String.class), equalTo(value.get(0)));
+
+        verifyNoInteractions(processingFailuresCounter);
+        verifyNoInteractions(parseErrorsCounter);
+        verifyNoInteractions(handleFailedEventsOption);
+    }
+
+    @Test
+    void test_when_deleteSourceFlagEnabled() {
+        when(processorConfig.isDeleteSourceRequested()).thenReturn(true);
+        parseJsonProcessor = createObjectUnderTest();
+
+        final String key = "key";
+        final ArrayList<String> value = new ArrayList<>(List.of("Element0","Element1","Element2"));
+        final String jsonArray = "{\"key\":[\"Element0\",\"Element1\",\"Element2\"]}";
+        final Event parsedEvent = createAndParseMessageEvent(jsonArray);
+
+        assertThat(parsedEvent.containsKey(processorConfig.getSource()), equalTo(false));
+        assertThat(parsedEvent.get(key, ArrayList.class), equalTo(value));
+        final String pointerToFirstElement = key + "/0";
+        assertThat(parsedEvent.get(pointerToFirstElement, String.class), equalTo(value.get(0)));
+
+        verifyNoInteractions(processingFailuresCounter);
+        verifyNoInteractions(parseErrorsCounter);
+        verifyNoInteractions(handleFailedEventsOption);
     }
 
     @Test
@@ -210,6 +367,10 @@ public class ParseJsonProcessorTest {
 
         final String pointerToInternalValue = key + "/0/key0";
         assertThat(parsedEvent.get(pointerToInternalValue, String.class), equalTo("value0"));
+
+        verifyNoInteractions(processingFailuresCounter);
+        verifyNoInteractions(parseErrorsCounter);
+        verifyNoInteractions(handleFailedEventsOption);
     }
 
     @Test
@@ -228,6 +389,10 @@ public class ParseJsonProcessorTest {
 
         assertThat(parsedEvent.get("key0", String.class), equalTo("value0"));
         assertThat(parsedEvent.containsKey("key1"),equalTo(false));
+
+        verifyNoInteractions(processingFailuresCounter);
+        verifyNoInteractions(parseErrorsCounter);
+        verifyNoInteractions(handleFailedEventsOption);
     }
 
     @Test
@@ -241,6 +406,10 @@ public class ParseJsonProcessorTest {
 
         assertThat(parsedEvent.containsKey(processorConfig.getSource()), equalTo(true));
         assertThat(parsedEvent.get("key.0", String.class), equalTo(value.get(0)));
+
+        verifyNoInteractions(processingFailuresCounter);
+        verifyNoInteractions(parseErrorsCounter);
+        verifyNoInteractions(handleFailedEventsOption);
     }
 
     @Test
@@ -261,6 +430,10 @@ public class ParseJsonProcessorTest {
         assertThatKeyEquals(parsedEvent, "s3", data.get("s3"));
 
         assertThatKeyEquals(parsedEvent, "log.s3", Collections.singletonMap("data", "sample data"));
+
+        verifyNoInteractions(processingFailuresCounter);
+        verifyNoInteractions(parseErrorsCounter);
+        verifyNoInteractions(handleFailedEventsOption);
     }
 
     @Test
@@ -276,6 +449,10 @@ public class ParseJsonProcessorTest {
 
         assertThat(parsedEvent.get(location, String.class), equalTo("value"));
         assertThat(parsedEvent.get(destination, Map.class), equalTo(data));
+
+        verifyNoInteractions(processingFailuresCounter);
+        verifyNoInteractions(parseErrorsCounter);
+        verifyNoInteractions(handleFailedEventsOption);
     }
 
     @Test
@@ -317,6 +494,7 @@ public class ParseJsonProcessorTest {
         final Map<String, Object> data = Collections.singletonMap("key", "value");
         final String serializedMessage = convertMapToJSONString(data);
         final Record<Event> testEvent = createMessageEvent(serializedMessage);
+        when(expressionEvaluator.isValidExpressionStatement(whenCondition)).thenReturn(true);
         when(expressionEvaluator.evaluateConditional(whenCondition, testEvent.getData())).thenReturn(false);
         parseJsonProcessor = createObjectUnderTest(); // need to recreate so that new config options are used
 
@@ -324,10 +502,16 @@ public class ParseJsonProcessorTest {
 
         assertThat(parsedEvent.toMap(), equalTo(testEvent.getData().toMap()));
 
+        verifyNoInteractions(processingFailuresCounter);
+        verifyNoInteractions(parseErrorsCounter);
+        verifyNoInteractions(handleFailedEventsOption);
+
     }
 
     @Test
     void test_tags_when_json_parse_fails() {
+        when(handleFailedEventsOption.shouldLog()).thenReturn(true);
+
         final String source = "different_source";
         final String destination = "destination_key";
         when(processorConfig.getSource()).thenReturn(source);
@@ -337,15 +521,20 @@ public class ParseJsonProcessorTest {
         List<String> testTags = List.of("tag1", "tag2");
         when(processorConfig.getTagsOnFailure()).thenReturn(testTags);
         final Record<Event> testEvent = createMessageEvent("{key:}");
+        when(expressionEvaluator.isValidExpressionStatement(whenCondition)).thenReturn(true);
         when(expressionEvaluator.evaluateConditional(whenCondition, testEvent.getData())).thenReturn(true);
         parseJsonProcessor = createObjectUnderTest();
 
         final Event parsedEvent = createAndParseMessageEvent(testEvent);
         assertTrue(parsedEvent.getMetadata().hasTags(testTags));
+
+        verify(parseErrorsCounter).increment();
     }
 
     @Test
     void when_evaluate_conditional_throws_RuntimeException_events_are_not_dropped() {
+        when(handleFailedEventsOption.shouldLog()).thenReturn(true);
+
         final String source = "different_source";
         final String destination = "destination_key";
         when(processorConfig.getSource()).thenReturn(source);
@@ -355,12 +544,16 @@ public class ParseJsonProcessorTest {
         final Map<String, Object> data = Collections.singletonMap("key", "value");
         final String serializedMessage = convertMapToJSONString(data);
         final Record<Event> testEvent = createMessageEvent(serializedMessage);
+        when(expressionEvaluator.isValidExpressionStatement(whenCondition)).thenReturn(true);
         when(expressionEvaluator.evaluateConditional(whenCondition, testEvent.getData())).thenThrow(RuntimeException.class);
         parseJsonProcessor = createObjectUnderTest();
 
         final Event parsedEvent = createAndParseMessageEvent(testEvent);
 
         assertThat(parsedEvent.toMap(), equalTo(testEvent.getData().toMap()));
+
+        verify(processingFailuresCounter).increment();
+        verifyNoInteractions(parseErrorsCounter);
     }
 
     private String constructDeeplyNestedJsonPointer(final int numberOfLayers) {
@@ -373,23 +566,21 @@ public class ParseJsonProcessorTest {
 
     /**
      * Naive serialization that converts every = to : and wraps every word with double quotes (no error handling or input validation).
-     * @param messageMap
-     * @return
+     * @param messageMap source key value map
+     * @return serialized string representation of the map
      */
     private String convertMapToJSONString(final Map<String, Object> messageMap) {
         final String replaceEquals = messageMap.toString().replace("=",":");
-        final String addQuotes = replaceEquals.replaceAll("(\\w+)", "\"$1\""); // wrap every word in quotes
-        return addQuotes;
+        return replaceEquals.replaceAll("(\\w+)", "\"$1\"");
     }
 
     /**
      * Creates a Map that maps a single key to a value nested numberOfLayers layers deep.
-     * @param numberOfLayers
-     * @return
+     * @param numberOfLayers indicates the depth of layers count
+     * @return a Map representing the nested structure
      */
     private Map<String, Object> constructArbitrarilyDeepJsonMap(final int numberOfLayers) {
-        final Map<String, Object> result = Collections.singletonMap(DEEPLY_NESTED_KEY_NAME,deepJsonMapHelper(0,numberOfLayers));
-        return result;
+        return Collections.singletonMap(DEEPLY_NESTED_KEY_NAME,deepJsonMapHelper(0,numberOfLayers));
     }
 
     private Object deepJsonMapHelper(final int currentLayer, final int numberOfLayers) {
@@ -420,10 +611,7 @@ public class ParseJsonProcessorTest {
     }
 
     private Record<Event> buildRecordWithEvent(final Map<String, Object> data) {
-        return new Record<>(JacksonEvent.builder()
-                .withData(data)
-                .withEventType("event")
-                .build());
+        return new Record<>(testEventFactory.eventBuilder(EventBuilder.class).withData(data).build());
     }
 
     private void assertThatKeyEquals(final Event parsedEvent, final String key, final Object value) {

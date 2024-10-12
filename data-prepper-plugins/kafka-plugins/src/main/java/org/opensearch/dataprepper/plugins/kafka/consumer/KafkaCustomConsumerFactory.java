@@ -55,6 +55,8 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.IntStream;
 
+import static org.opensearch.dataprepper.logging.DataPrepperMarkers.SENSITIVE;
+
 public class KafkaCustomConsumerFactory {
     private static final Logger LOG = LoggerFactory.getLogger(KafkaCustomConsumerFactory.class);
 
@@ -134,14 +136,19 @@ public class KafkaCustomConsumerFactory {
                     break;
             }
         }
-        setConsumerTopicProperties(properties, topicConfig);
+        setConsumerTopicProperties(properties, topicConfig, topicConfig.getGroupId());
         setSchemaRegistryProperties(sourceConfig, properties, topicConfig);
-        LOG.debug("Starting consumer with the properties : {}", properties);
+        LOG.debug(SENSITIVE, "Starting consumer with the properties : {}", properties);
         return properties;
     }
 
-    private void setConsumerTopicProperties(final Properties properties, final TopicConsumerConfig topicConfig) {
-        properties.put(ConsumerConfig.GROUP_ID_CONFIG, topicConfig.getGroupId());
+
+    public static void setConsumerTopicProperties(final Properties properties, final TopicConsumerConfig topicConfig,
+                                                  final String groupId) {
+        properties.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
+        if (Objects.nonNull(topicConfig.getClientId())) {
+            properties.put(ConsumerConfig.CLIENT_ID_CONFIG, topicConfig.getClientId());
+        }
         properties.put(ConsumerConfig.MAX_PARTITION_FETCH_BYTES_CONFIG, (int)topicConfig.getMaxPartitionFetchBytes());
         properties.put(ConsumerConfig.RETRY_BACKOFF_MS_CONFIG, ((Long)topicConfig.getRetryBackoff().toMillis()).intValue());
         properties.put(ConsumerConfig.RECONNECT_BACKOFF_MS_CONFIG, ((Long)topicConfig.getReconnectBackoff().toMillis()).intValue());
@@ -218,9 +225,15 @@ public class KafkaCustomConsumerFactory {
         properties.put(KafkaAvroDeserializerConfig.AUTO_REGISTER_SCHEMAS, false);
         final CachedSchemaRegistryClient schemaRegistryClient = new CachedSchemaRegistryClient(properties.getProperty(KafkaAvroDeserializerConfig.SCHEMA_REGISTRY_URL_CONFIG),
             100, propertyMap);
+        final SchemaConfig schemaConfig = kafkaConsumerConfig.getSchemaConfig();
         try {
-            schemaType = schemaRegistryClient.getSchemaMetadata(topic.getName() + "-value",
-                kafkaConsumerConfig.getSchemaConfig().getVersion()).getSchemaType();
+            final String subject = topic.getName() + "-value";
+            if (schemaConfig.getVersion() != null) {
+                schemaType = schemaRegistryClient.getSchemaMetadata(subject,
+                        kafkaConsumerConfig.getSchemaConfig().getVersion()).getSchemaType();
+            } else {
+                schemaType = schemaRegistryClient.getLatestSchemaMetadata(subject).getSchemaType();
+            }
         } catch (IOException | RestClientException e) {
             LOG.error("Failed to connect to the schema registry...");
             throw new RuntimeException(e);

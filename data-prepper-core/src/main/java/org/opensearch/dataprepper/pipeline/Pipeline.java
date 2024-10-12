@@ -6,6 +6,7 @@
 package org.opensearch.dataprepper.pipeline;
 
 import com.google.common.base.Preconditions;
+import org.opensearch.dataprepper.DataPrepperShutdownOptions;
 import org.opensearch.dataprepper.acknowledgements.InactiveAcknowledgementSetManager;
 import org.opensearch.dataprepper.model.acknowledgements.AcknowledgementSetManager;
 import org.opensearch.dataprepper.model.buffer.Buffer;
@@ -41,7 +42,6 @@ import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -54,7 +54,8 @@ import static java.lang.String.format;
 @SuppressWarnings({"rawtypes", "unchecked"})
 public class Pipeline {
     private static final Logger LOG = LoggerFactory.getLogger(Pipeline.class);
-    private volatile AtomicBoolean stopRequested;
+    private static final int SINK_LOGGING_FREQUENCY = (int) Duration.ofSeconds(60).toMillis();
+    private final PipelineShutdown pipelineShutdown;
 
     private final String name;
     private final Source source;
@@ -136,7 +137,7 @@ public class Pipeline {
         this.sinkExecutorService = PipelineThreadPoolExecutor.newFixedThreadPool(processorThreads,
                 new PipelineThreadFactory(format("%s-sink-worker", name)), this);
 
-        stopRequested = new AtomicBoolean(false);
+        this.pipelineShutdown = new PipelineShutdown(name, buffer);
     }
 
     AcknowledgementSetManager getAcknowledgementSetManager() {
@@ -175,7 +176,11 @@ public class Pipeline {
     }
 
     public boolean isStopRequested() {
-        return stopRequested.get();
+        return pipelineShutdown.isStopRequested();
+    }
+
+    public boolean isForceStopReadingBuffers() {
+        return pipelineShutdown.isForceStopReadingBuffers();
     }
 
     public Duration getPeerForwarderDrainTimeout() {
@@ -249,12 +254,13 @@ public class Pipeline {
 
             sinkExecutorService.submit(() -> {
                 long retryCount = 0;
+                final long sleepIfNotReadyTime = 200;
                 while (!isReady() && !isStopRequested()) {
-                    if (retryCount++ % 60 == 0) {
+                    if (retryCount++ % (SINK_LOGGING_FREQUENCY / sleepIfNotReadyTime) == 0) {
                         LOG.info("Pipeline [{}] Waiting for Sink to be ready", name);
                     }
                     try {
-                        Thread.sleep(1000);
+                        Thread.sleep(sleepIfNotReadyTime);
                     } catch (Exception e){}
                 }
                 startSourceAndProcessors();
@@ -263,6 +269,10 @@ public class Pipeline {
             //source failed to start - Cannot proceed further with the current pipeline, skipping further execution
             LOG.error("Pipeline [{}] encountered exception while starting the source, skipping execution", name, ex);
         }
+    }
+
+    public synchronized void shutdown() {
+        shutdown(DataPrepperShutdownOptions.defaultOptions());
     }
 
     /**
@@ -274,19 +284,20 @@ public class Pipeline {
      * 5. Shutting down processors and sinks
      * 6. Stopping the sink ExecutorService
      */
-    public synchronized void shutdown() {
+    public synchronized void shutdown(final DataPrepperShutdownOptions dataPrepperShutdownOptions) {
         LOG.info("Pipeline [{}] - Received shutdown signal with buffer drain timeout {}, processor shutdown timeout {}, " +
                         "and sink shutdown timeout {}. Initiating the shutdown process",
                 name, buffer.getDrainTimeout(), processorShutdownTimeout, sinkShutdownTimeout);
         try {
             source.stop();
-            stopRequested.set(true);
         } catch (Exception ex) {
             LOG.error("Pipeline [{}] - Encountered exception while stopping the source, " +
                     "proceeding with termination of process workers", name, ex);
         }
 
-        shutdownExecutorService(processorExecutorService, buffer.getDrainTimeout().toMillis() + processorShutdownTimeout.toMillis(), "processor");
+        pipelineShutdown.shutdown(dataPrepperShutdownOptions);
+
+        shutdownExecutorService(processorExecutorService, pipelineShutdown.getBufferDrainTimeout().plus(processorShutdownTimeout), "processor");
 
         processorSets.forEach(processorSet -> processorSet.forEach(Processor::shutdown));
         buffer.shutdown();
@@ -295,7 +306,7 @@ public class Pipeline {
                 .map(DataFlowComponent::getComponent)
                 .forEach(Sink::shutdown);
 
-        shutdownExecutorService(sinkExecutorService, sinkShutdownTimeout.toMillis(), "sink");
+        shutdownExecutorService(sinkExecutorService, sinkShutdownTimeout, "sink");
 
         LOG.info("Pipeline [{}] - Pipeline fully shutdown.", name);
 
@@ -310,13 +321,13 @@ public class Pipeline {
         observers.remove(pipelineObserver);
     }
 
-    private void shutdownExecutorService(final ExecutorService executorService, final long timeoutForTerminationInMillis, final String workerName) {
+    private void shutdownExecutorService(final ExecutorService executorService, final Duration timeoutForTermination, final String workerName) {
         LOG.info("Pipeline [{}] - Shutting down {} process workers.", name, workerName);
 
         executorService.shutdown();
         try {
-            if (!executorService.awaitTermination(timeoutForTerminationInMillis, TimeUnit.MILLISECONDS)) {
-                LOG.warn("Pipeline [{}] - Workers did not terminate in time, forcing termination of {} workers.", name, workerName);
+            if (!executorService.awaitTermination(timeoutForTermination.toMillis(), TimeUnit.MILLISECONDS)) {
+                LOG.warn("Pipeline [{}] - Workers did not terminate in {}, forcing termination of {} workers.", name, timeoutForTermination, workerName);
                 executorService.shutdownNow();
             }
         } catch (InterruptedException ex) {
@@ -339,7 +350,7 @@ public class Pipeline {
 
         final RouterGetRecordStrategy getRecordStrategy =
                 new RouterCopyRecordStrategy(eventFactory,
-                (source.areAcknowledgementsEnabled()) ?
+                (source.areAcknowledgementsEnabled() || buffer.areAcknowledgementsEnabled()) ?
                     acknowledgementSetManager :
                     InactiveAcknowledgementSetManager.getInstance(),
                 sinks);

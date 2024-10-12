@@ -4,10 +4,14 @@
  */
 package org.opensearch.dataprepper.plugins.kafka.util;
 
+import org.opensearch.dataprepper.model.plugin.PluginConfigObservable;
+import org.opensearch.dataprepper.plugins.kafka.authenticator.DynamicSaslClientCallbackHandler;
+import org.opensearch.dataprepper.plugins.kafka.authenticator.DynamicBasicCredentialsProvider;
 import org.opensearch.dataprepper.plugins.kafka.configuration.AuthConfig;
 import org.opensearch.dataprepper.plugins.kafka.configuration.AwsConfig;
 import org.opensearch.dataprepper.plugins.kafka.configuration.AwsIamAuthConfig;
 import org.opensearch.dataprepper.plugins.kafka.configuration.EncryptionConfig;
+import org.opensearch.dataprepper.plugins.kafka.configuration.KafkaConnectionConfig;
 import org.opensearch.dataprepper.plugins.kafka.configuration.KafkaConsumerConfig;
 import org.opensearch.dataprepper.plugins.kafka.source.KafkaSourceConfig;
 import org.opensearch.dataprepper.plugins.kafka.configuration.SchemaConfig;
@@ -15,6 +19,7 @@ import org.opensearch.dataprepper.plugins.kafka.configuration.OAuthConfig;
 import org.opensearch.dataprepper.plugins.kafka.configuration.EncryptionType;
 import org.opensearch.dataprepper.plugins.kafka.configuration.PlainTextAuthConfig;
 import org.opensearch.dataprepper.plugins.kafka.configuration.SchemaRegistryType;
+import org.opensearch.dataprepper.plugins.kafka.configuration.ScramAuthConfig;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 
 import software.amazon.awssdk.services.kafka.KafkaClient;
@@ -83,8 +88,13 @@ public class KafkaSecurityConfigurer {
     private static final String REGISTRY_BASIC_AUTH_USER_INFO = "schema.registry.basic.auth.user.info";
 
     private static final int MAX_KAFKA_CLIENT_RETRIES = 360; // for one hour every 10 seconds
+    private static final String SSL_ENGINE_FACTORY_CLASS = "ssl.engine.factory.class";
+    private static final String CERTIFICATE_CONTENT = "certificateContent";
+    private static final String SSL_TRUSTSTORE_LOCATION = "ssl.truststore.location";
+    private static final String SSL_TRUSTSTORE_PASSWORD = "ssl.truststore.password";
 
-    private static AwsCredentialsProvider credentialsProvider;
+    private static AwsCredentialsProvider mskCredentialsProvider;
+    private static AwsCredentialsProvider awsGlueCredentialsProvider;
     private static GlueSchemaRegistryKafkaDeserializer glueDeserializer;
 
 
@@ -108,16 +118,52 @@ public class KafkaSecurityConfigurer {
         properties.put(SASL_JAAS_CONFIG, String.format(PLAINTEXT_JAASCONFIG, username, password));
     }*/
 
-    private static void setPlainTextAuthProperties(Properties properties, final PlainTextAuthConfig plainTextAuthConfig, EncryptionType encryptionType) {
-        String username = plainTextAuthConfig.getUsername();
-        String password = plainTextAuthConfig.getPassword();
+    private static void setPlainTextAuthProperties(final Properties properties, final PlainTextAuthConfig plainTextAuthConfig,
+                                                   final EncryptionConfig encryptionConfig) {
+        final String username = plainTextAuthConfig.getUsername();
+        final String password = plainTextAuthConfig.getPassword();
         properties.put(SASL_MECHANISM, "PLAIN");
         properties.put(SASL_JAAS_CONFIG, "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"" + username + "\" password=\"" + password + "\";");
-        if (encryptionType == EncryptionType.NONE) {
-            properties.put(SECURITY_PROTOCOL, "SASL_PLAINTEXT");
-        } else { // EncryptionType.SSL
+        if (checkEncryptionType(encryptionConfig, EncryptionType.SSL)) {
             properties.put(SECURITY_PROTOCOL, "SASL_SSL");
+            setSecurityProtocolSSLProperties(properties, encryptionConfig);
+        } else { // EncryptionType.NONE
+            properties.put(SECURITY_PROTOCOL, "SASL_PLAINTEXT");
         }
+    }
+
+    private static void setScramAuthProperties(final Properties properties, final ScramAuthConfig scramAuthConfig,
+                                                   final EncryptionConfig encryptionConfig) {
+        final String username = scramAuthConfig.getUsername();
+        final String password = scramAuthConfig.getPassword();
+        final String mechanism = scramAuthConfig.getMechanism();
+        properties.put(SASL_MECHANISM, mechanism);
+        properties.put(SASL_JAAS_CONFIG, "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"" + username + "\" password=\"" + password + "\";");
+        if (checkEncryptionType(encryptionConfig, EncryptionType.SSL)) {
+            properties.put(SECURITY_PROTOCOL, "SASL_SSL");
+            setSecurityProtocolSSLProperties(properties, encryptionConfig);
+        } else { // EncryptionType.NONE
+            properties.put(SECURITY_PROTOCOL, "SASL_PLAINTEXT");
+        }
+    }
+
+    private static void setSecurityProtocolSSLProperties(final Properties properties, final EncryptionConfig encryptionConfig) {
+        if (Objects.nonNull(encryptionConfig.getCertificate())) {
+            setCustomSslProperties(properties, encryptionConfig.getCertificate());
+        } else if (Objects.nonNull(encryptionConfig.getTrustStoreFilePath()) &&
+                Objects.nonNull(encryptionConfig.getTrustStorePassword())) {
+            setTruststoreProperties(properties, encryptionConfig);
+        }
+    }
+
+    private static void setCustomSslProperties(final Properties properties, final String certificateContent) {
+        properties.put(CERTIFICATE_CONTENT, certificateContent);
+        properties.put(SSL_ENGINE_FACTORY_CLASS, CustomClientSslEngineFactory.class);
+    }
+
+    private static void setTruststoreProperties(final Properties properties, final EncryptionConfig encryptionConfig) {
+        properties.put(SSL_TRUSTSTORE_LOCATION, encryptionConfig.getTrustStoreFilePath());
+        properties.put(SSL_TRUSTSTORE_PASSWORD, encryptionConfig.getTrustStorePassword());
     }
 
     public static void setOauthProperties(final KafkaClusterAuthConfig kafkaClusterAuthConfig,
@@ -178,6 +224,9 @@ public class KafkaSecurityConfigurer {
         properties.put(SASL_MECHANISM, "AWS_MSK_IAM");
         properties.put(SASL_CLIENT_CALLBACK_HANDLER_CLASS, "software.amazon.msk.auth.iam.IAMClientCallbackHandler");
         if (awsIamAuthConfig == AwsIamAuthConfig.ROLE) {
+            if (Objects.isNull(awsConfig)) {
+                throw new RuntimeException("AWS Config needs to be specified when sasl/aws_msk_iam is set to \"role\"");
+            }
             String baseIamAuthConfig = "software.amazon.msk.auth.iam.IAMLoginModule required " +
                 "awsRoleArn=\"%s\" " +
                 "awsStsRegion=\"%s\"";
@@ -196,14 +245,16 @@ public class KafkaSecurityConfigurer {
         }
     }
 
-    public static String getBootStrapServersForMsk(final AwsIamAuthConfig awsIamAuthConfig, final AwsConfig awsConfig, final Logger LOG) {
-        if (awsIamAuthConfig == AwsIamAuthConfig.ROLE) {
+    private static void configureMSKCredentialsProvider(final AuthConfig authConfig, final AwsConfig awsConfig) {
+        mskCredentialsProvider = DefaultCredentialsProvider.create();
+        if (Objects.nonNull(authConfig) && Objects.nonNull(authConfig.getSaslAuthConfig()) &&
+                authConfig.getSaslAuthConfig().getAwsIamAuthConfig() == AwsIamAuthConfig.ROLE) {
             String sessionName = "data-prepper-kafka-session" + UUID.randomUUID();
             StsClient stsClient = StsClient.builder()
                     .region(Region.of(awsConfig.getRegion()))
-                    .credentialsProvider(credentialsProvider)
+                    .credentialsProvider(mskCredentialsProvider)
                     .build();
-            credentialsProvider = StsAssumeRoleCredentialsProvider
+            mskCredentialsProvider = StsAssumeRoleCredentialsProvider
                     .builder()
                     .stsClient(stsClient)
                     .refreshRequest(
@@ -213,12 +264,15 @@ public class KafkaSecurityConfigurer {
                                     .roleSessionName(sessionName)
                                     .build()
                     ).build();
-        } else if (awsIamAuthConfig != AwsIamAuthConfig.DEFAULT) {
-            throw new RuntimeException("Unknown AWS IAM auth mode");
         }
+    }
+
+    public static String getBootStrapServersForMsk(final AwsConfig awsConfig,
+                                                   final AwsCredentialsProvider mskCredentialsProvider,
+                                                   final Logger log) {
         final AwsConfig.AwsMskConfig awsMskConfig = awsConfig.getAwsMskConfig();
         KafkaClient kafkaClient = KafkaClient.builder()
-                .credentialsProvider(credentialsProvider)
+                .credentialsProvider(mskCredentialsProvider)
                 .region(Region.of(awsConfig.getRegion()))
                 .build();
         final GetBootstrapBrokersRequest request =
@@ -235,7 +289,7 @@ public class KafkaSecurityConfigurer {
             try {
                 result = kafkaClient.getBootstrapBrokers(request);
             } catch (KafkaException | StsException e) {
-                LOG.info("Failed to get bootstrap server information from MSK. Will try every 10 seconds for {} seconds", 10*MAX_KAFKA_CLIENT_RETRIES, e);
+                log.info("Failed to get bootstrap server information from MSK. Will try every 10 seconds for {} seconds", 10*MAX_KAFKA_CLIENT_RETRIES, e);
                 try {
                     Thread.sleep(10000);
                 } catch (InterruptedException exp) {}
@@ -257,71 +311,118 @@ public class KafkaSecurityConfigurer {
                 return result.bootstrapBrokerStringSaslIam();
         }
     }
-
-    public static void setAuthProperties(Properties properties, final KafkaClusterAuthConfig kafkaClusterAuthConfig, final Logger LOG) {
+    public static void setDynamicSaslClientCallbackHandler(final Properties properties,
+                                                           final KafkaConnectionConfig kafkaConnectionConfig,
+                                                           final PluginConfigObservable pluginConfigObservable) {
+        final AuthConfig authConfig = kafkaConnectionConfig.getAuthConfig();
+        if (Objects.nonNull(authConfig)) {
+            AuthConfig.SaslAuthConfig saslAuthConfig = authConfig.getSaslAuthConfig();
+            if (Objects.nonNull(saslAuthConfig) && Objects.nonNull(saslAuthConfig.getPlainTextAuthConfig())) {
+                final DynamicBasicCredentialsProvider dynamicBasicCredentialsProvider =
+                        DynamicBasicCredentialsProvider.getInstance();
+                pluginConfigObservable.addPluginConfigObserver(
+                        newConfig -> dynamicBasicCredentialsProvider.refresh((KafkaConnectionConfig) newConfig));
+                dynamicBasicCredentialsProvider.refresh(kafkaConnectionConfig);
+                properties.put(SASL_CLIENT_CALLBACK_HANDLER_CLASS, DynamicSaslClientCallbackHandler.class);
+            }
+        }
+    }
+    public static void setAuthProperties(final Properties properties, final KafkaClusterAuthConfig kafkaClusterAuthConfig, final Logger log) {
         final AwsConfig awsConfig = kafkaClusterAuthConfig.getAwsConfig();
         final AuthConfig authConfig = kafkaClusterAuthConfig.getAuthConfig();
         final EncryptionConfig encryptionConfig = kafkaClusterAuthConfig.getEncryptionConfig();
-        final EncryptionType encryptionType = encryptionConfig.getType();
-
-        credentialsProvider = DefaultCredentialsProvider.create();
+        configureMSKCredentialsProvider(authConfig, awsConfig);
 
         String bootstrapServers = "";
         if (Objects.nonNull(kafkaClusterAuthConfig.getBootstrapServers())) {
             bootstrapServers = String.join(",", kafkaClusterAuthConfig.getBootstrapServers());
         }
-        AwsIamAuthConfig awsIamAuthConfig = null;
+        if (Objects.nonNull(awsConfig) && Objects.nonNull(awsConfig.getAwsMskConfig())) {
+            bootstrapServers = getBootStrapServersForMsk(awsConfig, mskCredentialsProvider, log);
+        }
+
         if (Objects.nonNull(authConfig)) {
-            AuthConfig.SaslAuthConfig saslAuthConfig = authConfig.getSaslAuthConfig();
+            final AuthConfig.SaslAuthConfig saslAuthConfig = authConfig.getSaslAuthConfig();
             if (Objects.nonNull(saslAuthConfig)) {
-                awsIamAuthConfig = saslAuthConfig.getAwsIamAuthConfig();
-                PlainTextAuthConfig plainTextAuthConfig = saslAuthConfig.getPlainTextAuthConfig();
+                final AwsIamAuthConfig awsIamAuthConfig = saslAuthConfig.getAwsIamAuthConfig();
+                final ScramAuthConfig scramAuthConfig = saslAuthConfig.getScramAuthConfig();
+                final PlainTextAuthConfig plainTextAuthConfig = saslAuthConfig.getPlainTextAuthConfig();
 
                 if (Objects.nonNull(awsIamAuthConfig)) {
-                    if (encryptionType == EncryptionType.NONE) {
+                    if (checkEncryptionType(encryptionConfig, EncryptionType.NONE)) {
                         throw new RuntimeException("Encryption Config must be SSL to use IAM authentication mechanism");
                     }
-                    if (Objects.isNull(awsConfig)) {
-                        throw new RuntimeException("AWS Config is not specified");
-                    }
                     setAwsIamAuthProperties(properties, awsIamAuthConfig, awsConfig);
-                    bootstrapServers = getBootStrapServersForMsk(awsIamAuthConfig, awsConfig, LOG);
                 } else if (Objects.nonNull(saslAuthConfig.getOAuthConfig())) {
                     setOauthProperties(kafkaClusterAuthConfig, properties);
-                } else if (Objects.nonNull(plainTextAuthConfig)) {
-                    setPlainTextAuthProperties(properties, plainTextAuthConfig, encryptionType);
+                } else if (Objects.nonNull(scramAuthConfig) && Objects.nonNull(kafkaClusterAuthConfig.getEncryptionConfig())) {
+                    setScramAuthProperties(properties, scramAuthConfig, kafkaClusterAuthConfig.getEncryptionConfig());
+                }  else if (Objects.nonNull(plainTextAuthConfig) && Objects.nonNull(kafkaClusterAuthConfig.getEncryptionConfig())) {
+                    setPlainTextAuthProperties(properties, plainTextAuthConfig, kafkaClusterAuthConfig.getEncryptionConfig());
                 } else {
                     throw new RuntimeException("No SASL auth config specified");
                 }
             }
             if (encryptionConfig.getInsecure()) {
-                properties.put("ssl.engine.factory.class", InsecureSslEngineFactory.class);
+                properties.put(SSL_ENGINE_FACTORY_CLASS, InsecureSslEngineFactory.class);
             }
         }
         if (Objects.isNull(authConfig) || Objects.isNull(authConfig.getSaslAuthConfig())) {
-            if (encryptionType == EncryptionType.SSL) {
+            if (checkEncryptionType(encryptionConfig, EncryptionType.SSL)) {
                 properties.put(SECURITY_PROTOCOL, "SSL");
+                setSecurityProtocolSSLProperties(properties, encryptionConfig);
             }
         }
         if (Objects.isNull(bootstrapServers) || bootstrapServers.isEmpty()) {
             throw new RuntimeException("Bootstrap servers are not specified");
         }
+
         properties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
     }
 
+    private static boolean checkEncryptionType(final EncryptionConfig encryptionConfig, final EncryptionType encryptionType) {
+        return Objects.nonNull(encryptionConfig) && encryptionConfig.getType() == encryptionType;
+    }
+
     public static GlueSchemaRegistryKafkaDeserializer getGlueSerializer(final KafkaConsumerConfig kafkaConsumerConfig) {
+        configureAwsGlueCredentialsProvider(kafkaConsumerConfig.getAwsConfig());
         SchemaConfig schemaConfig = kafkaConsumerConfig.getSchemaConfig();
         if (Objects.isNull(schemaConfig) || schemaConfig.getType() != SchemaRegistryType.AWS_GLUE) {
             return null;
         }
-        Map<String, Object> configs = new HashMap();
-        configs.put(AWSSchemaRegistryConstants.AWS_REGION, kafkaConsumerConfig.getAwsConfig().getRegion());
+        Map<String, Object> configs = new HashMap<>();
+        final AwsConfig awsConfig = kafkaConsumerConfig.getAwsConfig();
+        if (Objects.nonNull(awsConfig) && Objects.nonNull(awsConfig.getRegion())) {
+            configs.put(AWSSchemaRegistryConstants.AWS_REGION, kafkaConsumerConfig.getAwsConfig().getRegion());
+        }
         configs.put(AWSSchemaRegistryConstants.AVRO_RECORD_TYPE, AvroRecordType.GENERIC_RECORD.getName());
         configs.put(AWSSchemaRegistryConstants.CACHE_TIME_TO_LIVE_MILLIS, "86400000");
         configs.put(AWSSchemaRegistryConstants.CACHE_SIZE, "10");
         configs.put(AWSSchemaRegistryConstants.COMPATIBILITY_SETTING, Compatibility.FULL);
-        glueDeserializer = new GlueSchemaRegistryKafkaDeserializer(credentialsProvider, configs);
+        glueDeserializer = new GlueSchemaRegistryKafkaDeserializer(awsGlueCredentialsProvider, configs);
         return glueDeserializer;
+    }
+
+    private static void configureAwsGlueCredentialsProvider(final AwsConfig awsConfig) {
+        awsGlueCredentialsProvider = DefaultCredentialsProvider.create();
+        if (Objects.nonNull(awsConfig) &&
+                Objects.nonNull(awsConfig.getRegion()) && Objects.nonNull(awsConfig.getStsRoleArn())) {
+            String sessionName = "data-prepper-kafka-session" + UUID.randomUUID();
+            StsClient stsClient = StsClient.builder()
+                    .region(Region.of(awsConfig.getRegion()))
+                    .credentialsProvider(awsGlueCredentialsProvider)
+                    .build();
+            awsGlueCredentialsProvider = StsAssumeRoleCredentialsProvider
+                    .builder()
+                    .stsClient(stsClient)
+                    .refreshRequest(
+                            AssumeRoleRequest
+                                    .builder()
+                                    .roleArn(awsConfig.getStsRoleArn())
+                                    .roleSessionName(sessionName)
+                                    .build()
+                    ).build();
+        }
     }
 
 }

@@ -5,13 +5,23 @@
 
 package org.opensearch.dataprepper.plugins.source.loghttp;
 
+import com.linecorp.armeria.server.HttpService;
+import com.linecorp.armeria.server.Server;
+import com.linecorp.armeria.server.ServerBuilder;
 import com.linecorp.armeria.server.encoding.DecodingService;
+import com.linecorp.armeria.server.healthcheck.HealthCheckService;
+import com.linecorp.armeria.server.throttling.ThrottlingService;
 import org.opensearch.dataprepper.HttpRequestExceptionHandler;
-import org.opensearch.dataprepper.plugins.codec.CompressionOption;
+import org.opensearch.dataprepper.armeria.authentication.ArmeriaHttpAuthenticationProvider;
+import org.opensearch.dataprepper.http.HttpServerConfig;
+import org.opensearch.dataprepper.http.LogThrottlingRejectHandler;
+import org.opensearch.dataprepper.http.LogThrottlingStrategy;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPlugin;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPluginConstructor;
 import org.opensearch.dataprepper.model.buffer.Buffer;
+import org.opensearch.dataprepper.model.codec.ByteDecoder;
+import org.opensearch.dataprepper.model.codec.JsonDecoder;
 import org.opensearch.dataprepper.model.configuration.PipelineDescription;
 import org.opensearch.dataprepper.model.configuration.PluginModel;
 import org.opensearch.dataprepper.model.configuration.PluginSetting;
@@ -19,17 +29,10 @@ import org.opensearch.dataprepper.model.log.Log;
 import org.opensearch.dataprepper.model.plugin.PluginFactory;
 import org.opensearch.dataprepper.model.record.Record;
 import org.opensearch.dataprepper.model.source.Source;
-import org.opensearch.dataprepper.model.codec.ByteDecoder;
-import org.opensearch.dataprepper.model.codec.JsonDecoder;
-import com.linecorp.armeria.server.HttpService;
-import com.linecorp.armeria.server.Server;
-import com.linecorp.armeria.server.ServerBuilder;
-import com.linecorp.armeria.server.healthcheck.HealthCheckService;
-import com.linecorp.armeria.server.throttling.ThrottlingService;
-import org.opensearch.dataprepper.armeria.authentication.ArmeriaHttpAuthenticationProvider;
 import org.opensearch.dataprepper.plugins.certificate.CertificateProvider;
 import org.opensearch.dataprepper.plugins.certificate.model.Certificate;
-import org.opensearch.dataprepper.plugins.source.loghttp.certificate.CertificateProviderFactory;
+import org.opensearch.dataprepper.plugins.codec.CompressionOption;
+import org.opensearch.dataprepper.http.certificate.CertificateProviderFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -47,8 +50,9 @@ public class HTTPSource implements Source<Record<Log>> {
     private static final Logger LOG = LoggerFactory.getLogger(HTTPSource.class);
     private static final String PIPELINE_NAME_PLACEHOLDER = "${pipelineName}";
     public static final String REGEX_HEALTH = "regex:^/(?!health$).*$";
+    static final String SERVER_CONNECTIONS = "serverConnections";
 
-    private final HTTPSourceConfig sourceConfig;
+    private final HttpServerConfig sourceConfig;
     private final CertificateProviderFactory certificateProviderFactory;
     private final ArmeriaHttpAuthenticationProvider authenticationProvider;
     private final HttpRequestExceptionHandler httpRequestExceptionHandler;
@@ -137,7 +141,7 @@ public class HTTPSource implements Source<Record<Log>> {
 
             final String httpSourcePath = sourceConfig.getPath().replace(PIPELINE_NAME_PLACEHOLDER, pipelineName);
             sb.decorator(httpSourcePath, ThrottlingService.newDecorator(logThrottlingStrategy, logThrottlingRejectHandler));
-            final LogHTTPService logHTTPService = new LogHTTPService(sourceConfig.getBufferTimeoutInMillis(), buffer, byteDecoder, pluginMetrics);
+            final LogHTTPService logHTTPService = new LogHTTPService(sourceConfig.getBufferTimeoutInMillis(), buffer, pluginMetrics);
 
             if (CompressionOption.NONE.equals(sourceConfig.getCompression())) {
                 sb.annotatedService(httpSourcePath, logHTTPService, httpRequestExceptionHandler);
@@ -151,6 +155,7 @@ public class HTTPSource implements Source<Record<Log>> {
             }
 
             server = sb.build();
+            pluginMetrics.gauge(SERVER_CONNECTIONS, server, Server::numConnections);
         }
 
         try {

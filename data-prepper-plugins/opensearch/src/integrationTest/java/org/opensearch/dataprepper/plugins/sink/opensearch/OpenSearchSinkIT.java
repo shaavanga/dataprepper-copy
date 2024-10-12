@@ -43,6 +43,7 @@ import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.event.EventType;
 import org.opensearch.dataprepper.model.event.JacksonEvent;
 import org.opensearch.dataprepper.model.opensearch.OpenSearchBulkActions;
+import org.opensearch.dataprepper.model.plugin.PluginConfigObservable;
 import org.opensearch.dataprepper.model.plugin.PluginFactory;
 import org.opensearch.dataprepper.model.record.Record;
 import org.opensearch.dataprepper.model.sink.SinkContext;
@@ -92,6 +93,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.params.provider.Arguments.arguments;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.opensearch.dataprepper.plugins.sink.opensearch.OpenSearchIntegrationHelper.createContentParser;
 import static org.opensearch.dataprepper.plugins.sink.opensearch.OpenSearchIntegrationHelper.createOpenSearchClient;
@@ -99,6 +101,9 @@ import static org.opensearch.dataprepper.plugins.sink.opensearch.OpenSearchInteg
 import static org.opensearch.dataprepper.plugins.sink.opensearch.OpenSearchIntegrationHelper.isOSBundle;
 import static org.opensearch.dataprepper.plugins.sink.opensearch.OpenSearchIntegrationHelper.waitForClusterStateUpdatesToFinish;
 import static org.opensearch.dataprepper.plugins.sink.opensearch.OpenSearchIntegrationHelper.wipeAllTemplates;
+import static org.opensearch.dataprepper.plugins.source.opensearch.configuration.AuthConfig.AUTHENTICATION;
+import static org.opensearch.dataprepper.plugins.source.opensearch.configuration.AuthConfig.PASSWORD;
+import static org.opensearch.dataprepper.plugins.source.opensearch.configuration.AuthConfig.USERNAME;
 
 public class OpenSearchSinkIT {
     private static final int LUCENE_CHAR_LENGTH_LIMIT = 32_766;
@@ -131,8 +136,12 @@ public class OpenSearchSinkIT {
     @Mock
     private ExpressionEvaluator expressionEvaluator;
 
+    @Mock
+    private PluginConfigObservable pluginConfigObservable;
+
     public OpenSearchSink createObjectUnderTest(PluginSetting pluginSetting, boolean doInitialize) {
-        OpenSearchSink sink = new OpenSearchSink(pluginSetting, pluginFactory, null, expressionEvaluator, awsCredentialsSupplier);
+        OpenSearchSink sink = new OpenSearchSink(
+                pluginSetting, pluginFactory, null, expressionEvaluator, awsCredentialsSupplier, pluginConfigObservable);
         if (doInitialize) {
             sink.doInitialize();
         }
@@ -143,7 +152,8 @@ public class OpenSearchSinkIT {
         sinkContext = mock(SinkContext.class);
         testTagsTargetKey = RandomStringUtils.randomAlphabetic(5);
         when(sinkContext.getTagsTargetKey()).thenReturn(testTagsTargetKey);
-        OpenSearchSink sink = new OpenSearchSink(pluginSetting, pluginFactory, sinkContext, expressionEvaluator, awsCredentialsSupplier);
+        OpenSearchSink sink = new OpenSearchSink(
+                pluginSetting, pluginFactory, sinkContext, expressionEvaluator, awsCredentialsSupplier, pluginConfigObservable);
         if (doInitialize) {
             sink.doInitialize();
         }
@@ -152,7 +162,7 @@ public class OpenSearchSinkIT {
 
     @BeforeEach
     public void setup() {
-
+        pluginConfigObservable = mock(PluginConfigObservable.class);
         expressionEvaluator = mock(ExpressionEvaluator.class);
         when(expressionEvaluator.isValidExpressionStatement(any(String.class))).thenReturn(false);
 
@@ -293,7 +303,7 @@ public class OpenSearchSinkIT {
                         .add(OpenSearchSink.BULKREQUEST_SIZE_BYTES).toString());
         assertThat(bulkRequestSizeBytesMetrics.size(), equalTo(3));
         assertThat(bulkRequestSizeBytesMetrics.get(0).getValue(), closeTo(1.0, 0));
-        final double expectedBulkRequestSizeBytes = isRequestCompressionEnabled && estimateBulkSizeUsingCompression ? 773.0 : 2058.0;
+        final double expectedBulkRequestSizeBytes = isRequestCompressionEnabled && estimateBulkSizeUsingCompression ? 792.0 : 2058.0;
         assertThat(bulkRequestSizeBytesMetrics.get(1).getValue(), closeTo(expectedBulkRequestSizeBytes, 0));
         assertThat(bulkRequestSizeBytesMetrics.get(2).getValue(), closeTo(expectedBulkRequestSizeBytes, 0));
     }
@@ -354,7 +364,7 @@ public class OpenSearchSinkIT {
                         .add(OpenSearchSink.BULKREQUEST_SIZE_BYTES).toString());
         assertThat(bulkRequestSizeBytesMetrics.size(), equalTo(3));
         assertThat(bulkRequestSizeBytesMetrics.get(0).getValue(), closeTo(1.0, 0));
-        final double expectedBulkRequestSizeBytes = isRequestCompressionEnabled && estimateBulkSizeUsingCompression ? 1066.0 : 2072.0;
+        final double expectedBulkRequestSizeBytes = isRequestCompressionEnabled && estimateBulkSizeUsingCompression ? 1078.0 : 2072.0;
         assertThat(bulkRequestSizeBytesMetrics.get(1).getValue(), closeTo(expectedBulkRequestSizeBytes, 0));
         assertThat(bulkRequestSizeBytesMetrics.get(2).getValue(), closeTo(expectedBulkRequestSizeBytes, 0));
 
@@ -416,7 +426,7 @@ public class OpenSearchSinkIT {
                         .add(OpenSearchSink.BULKREQUEST_SIZE_BYTES).toString());
         assertThat(bulkRequestSizeBytesMetrics.size(), equalTo(3));
         assertThat(bulkRequestSizeBytesMetrics.get(0).getValue(), closeTo(1.0, 0));
-        final double expectedBulkRequestSizeBytes = isRequestCompressionEnabled && estimateBulkSizeUsingCompression ? 366.0 : 265.0;
+        final double expectedBulkRequestSizeBytes = isRequestCompressionEnabled && estimateBulkSizeUsingCompression ? 376.0 : 265.0;
         assertThat(bulkRequestSizeBytesMetrics.get(1).getValue(), closeTo(expectedBulkRequestSizeBytes, 0));
         assertThat(bulkRequestSizeBytesMetrics.get(2).getValue(), closeTo(expectedBulkRequestSizeBytes, 0));
 
@@ -896,7 +906,7 @@ public class OpenSearchSinkIT {
 
     @Test
     public void testBulkActionUpdateWithDocumentRootKey() throws IOException, InterruptedException {
-        final String testIndexAlias = "test-alias-upd1";
+        final String testIndexAlias = "test-alias-update";
         final String testTemplateFile = Objects.requireNonNull(
                 getClass().getClassLoader().getResource(TEST_TEMPLATE_BULK_FILE)).getFile();
 
@@ -961,8 +971,39 @@ public class OpenSearchSinkIT {
     }
 
     @Test
+    public void testBulkActionUpsertWithActionsAndNoCreate() throws IOException, InterruptedException {
+        final String testIndexAlias = "test-alias-upsert-no-create2";
+        final String testTemplateFile = Objects.requireNonNull(
+                getClass().getClassLoader().getResource(TEST_TEMPLATE_BULK_FILE)).getFile();
+
+        final String testIdField = "someId";
+        final String testId = "foo";
+        List<Record<Event>> testRecords = Collections.singletonList(jsonStringToRecord(generateCustomRecordJson2(testIdField, testId, "key", "value")));
+
+        List<Map<String, Object>> aList = new ArrayList<>();
+        Map<String, Object> actionMap = new HashMap<>();
+        actionMap.put("type", OpenSearchBulkActions.UPSERT.toString());
+        aList.add(actionMap);
+
+        final PluginSetting pluginSetting = generatePluginSetting(null, testIndexAlias, testTemplateFile);
+        pluginSetting.getSettings().put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField); 
+        pluginSetting.getSettings().put(IndexConfiguration.ACTIONS, aList);
+        OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+
+        sink.output(testRecords);
+        List<Map<String, Object>> retSources = getSearchResponseDocSources(testIndexAlias);
+
+        assertThat(retSources.size(), equalTo(1));
+        Map<String, Object> source = retSources.get(0);
+        assertThat((String) source.get("key"), equalTo("value"));
+        assertThat((String) source.get(testIdField), equalTo(testId));
+        assertThat(getDocumentCount(testIndexAlias, "_id", testId), equalTo(Integer.valueOf(1)));
+        sink.shutdown();
+    }
+
+    @Test
     public void testBulkActionUpsertWithActions() throws IOException, InterruptedException {
-        final String testIndexAlias = "test-alias-upd2";
+        final String testIndexAlias = "test-alias-upsert";
         final String testTemplateFile = Objects.requireNonNull(
                 getClass().getClassLoader().getResource(TEST_TEMPLATE_BULK_FILE)).getFile();
 
@@ -1109,6 +1150,7 @@ public class OpenSearchSinkIT {
 
         final PluginSetting pluginSetting = generatePluginSetting(IndexType.TRACE_ANALYTICS_RAW.getValue(), null, null);
         final OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
+        verify(pluginConfigObservable).addPluginConfigObserver(any());
         sink.output(testRecords);
 
         final String expIndexAlias = IndexConstants.TYPE_TO_DEFAULT_ALIAS.get(IndexType.TRACE_ANALYTICS_RAW);
@@ -1477,8 +1519,7 @@ public class OpenSearchSinkIT {
 
         final Map<String, Object> metadata = initializeConfigurationMetadata(null, testIndexAlias, null);
         metadata.put(IndexConfiguration.INDEX_TYPE, IndexType.MANAGEMENT_DISABLED.getValue());
-        metadata.put(ConnectionConfiguration.USERNAME, username);
-        metadata.put(ConnectionConfiguration.PASSWORD, password);
+        metadata.put(AUTHENTICATION, Map.of(USERNAME, username, PASSWORD, password));
         metadata.put(IndexConfiguration.DOCUMENT_ID_FIELD, testIdField);
         final PluginSetting pluginSetting = generatePluginSettingByMetadata(metadata);
         final OpenSearchSink sink = createObjectUnderTest(pluginSetting, true);
@@ -1514,8 +1555,7 @@ public class OpenSearchSinkIT {
         final String user = System.getProperty("tests.opensearch.user");
         final String password = System.getProperty("tests.opensearch.password");
         if (user != null) {
-            metadata.put(ConnectionConfiguration.USERNAME, user);
-            metadata.put(ConnectionConfiguration.PASSWORD, password);
+            metadata.put(AUTHENTICATION, Map.of(USERNAME, user, PASSWORD, password));
         }
         final String distributionVersion = DeclaredOpenSearchVersion.OPENDISTRO_0_10.compareTo(
                 OpenSearchIntegrationHelper.getVersion()) >= 0 ?
@@ -1725,6 +1765,7 @@ public class OpenSearchSinkIT {
                 .filter(Predicate.not(indexName -> indexName.startsWith(".opendistro_")))
                 .filter(Predicate.not(indexName -> indexName.startsWith(".opensearch-")))
                 .filter(Predicate.not(indexName -> indexName.startsWith(".opensearch_")))
+                .filter(Predicate.not(indexName -> indexName.startsWith(".ql")))
                 .filter(Predicate.not(indexName -> indexName.startsWith(".plugins-ml-config")))
                 .forEach(indexName -> {
                     try {

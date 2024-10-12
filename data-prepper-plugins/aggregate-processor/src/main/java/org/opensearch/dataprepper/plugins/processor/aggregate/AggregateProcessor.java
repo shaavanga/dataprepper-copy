@@ -13,6 +13,7 @@ import org.opensearch.dataprepper.model.configuration.PluginModel;
 import org.opensearch.dataprepper.model.configuration.PluginSetting;
 import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.peerforwarder.RequiresPeerForwarding;
+import org.opensearch.dataprepper.model.plugin.InvalidPluginConfigurationException;
 import org.opensearch.dataprepper.model.plugin.PluginFactory;
 import org.opensearch.dataprepper.model.processor.AbstractProcessor;
 import org.opensearch.dataprepper.model.processor.Processor;
@@ -20,6 +21,7 @@ import org.opensearch.dataprepper.model.record.Record;
 import io.micrometer.core.instrument.Counter;
 import org.opensearch.dataprepper.plugins.hasher.IdentificationKeysHasher;
 
+import java.math.BigDecimal;
 import java.util.Collection;
 import java.util.LinkedList;
 import java.util.List;
@@ -46,8 +48,11 @@ public class AggregateProcessor extends AbstractProcessor<Record<Event>, Record<
     private final AggregateAction aggregateAction;
 
     private boolean forceConclude = false;
+    private boolean localMode = false;
     private final String whenCondition;
     private final ExpressionEvaluator expressionEvaluator;
+    private final boolean outputUnaggregatedEvents;
+    private final String aggregatedEventsTag;
 
     @DataPrepperPluginConstructor
     public AggregateProcessor(final AggregateProcessorConfig aggregateProcessorConfig, final PluginMetrics pluginMetrics, final PluginFactory pluginFactory, final ExpressionEvaluator expressionEvaluator) {
@@ -58,7 +63,9 @@ public class AggregateProcessor extends AbstractProcessor<Record<Event>, Record<
                               final IdentificationKeysHasher identificationKeysHasher, final AggregateActionSynchronizer.AggregateActionSynchronizerProvider aggregateActionSynchronizerProvider, final ExpressionEvaluator expressionEvaluator) {
         super(pluginMetrics);
         this.aggregateProcessorConfig = aggregateProcessorConfig;
+        this.aggregatedEventsTag = aggregateProcessorConfig.getAggregatedEventsTag();
         this.aggregateGroupManager = aggregateGroupManager;
+        this.outputUnaggregatedEvents = aggregateProcessorConfig.getOutputUnaggregatedEvents();
         this.expressionEvaluator = expressionEvaluator;
         this.identificationKeysHasher = identificationKeysHasher;
         this.aggregateAction = loadAggregateAction(pluginFactory);
@@ -69,8 +76,13 @@ public class AggregateProcessor extends AbstractProcessor<Record<Event>, Record<
         this.actionHandleEventsOutCounter = pluginMetrics.counter(ACTION_HANDLE_EVENTS_OUT);
         this.actionHandleEventsDroppedCounter = pluginMetrics.counter(ACTION_HANDLE_EVENTS_DROPPED);
         this.whenCondition = aggregateProcessorConfig.getWhenCondition();
+        this.localMode = aggregateProcessorConfig.getLocalMode();
 
         pluginMetrics.gauge(CURRENT_AGGREGATE_GROUPS, aggregateGroupManager, AggregateGroupManager::getAllGroupsSize);
+
+        if (aggregateProcessorConfig.getWhenCondition() != null && (!expressionEvaluator.isValidExpressionStatement(aggregateProcessorConfig.getWhenCondition()))) {
+            throw new InvalidPluginConfigurationException("aggregate_when {} is not a valid expression statement. See https://opensearch.org/docs/latest/data-prepper/pipelines/expression-syntax/ for valid expression syntax");
+        }
     }
 
     private AggregateAction loadAggregateAction(final PluginFactory pluginFactory) {
@@ -90,6 +102,9 @@ public class AggregateProcessor extends AbstractProcessor<Record<Event>, Record<
             final List<Event> concludeGroupEvents = actionOutput != null ? actionOutput.getEvents() : null;
             if (!concludeGroupEvents.isEmpty()) {
                 concludeGroupEvents.stream().forEach((event) -> {
+                    if (aggregatedEventsTag != null) {
+                        event.getMetadata().addTags(List.of(aggregatedEventsTag));
+                    }
                     recordsOut.add(new Record(event));
                     actionConcludeGroupEventsOutCounter.increment();
                 });
@@ -114,10 +129,16 @@ public class AggregateProcessor extends AbstractProcessor<Record<Event>, Record<
             final Event aggregateActionResponseEvent = handleEventResponse.getEvent();
 
             if (aggregateActionResponseEvent != null) {
+                if (aggregatedEventsTag != null) {
+                    aggregateActionResponseEvent.getMetadata().addTags(List.of(aggregatedEventsTag));
+                }
                 recordsOut.add(new Record<>(aggregateActionResponseEvent, record.getMetadata()));
                 handleEventsOut++;
             } else {
                 handleEventsDropped++;
+            }
+            if (outputUnaggregatedEvents) {
+                recordsOut.add(record);
             }
         }
 
@@ -132,6 +153,23 @@ public class AggregateProcessor extends AbstractProcessor<Record<Event>, Record<
         return currentTimeNanos;
     }
 
+    public static Instant convertObjectToInstant(Object timeObject) {
+        if (timeObject instanceof Instant) {
+            return (Instant)timeObject;
+        } else if (timeObject instanceof String) {
+            return Instant.parse((String)timeObject);
+        } else if (timeObject instanceof Integer || timeObject instanceof Long) {
+            long value = ((Number)timeObject).longValue();
+            return (value > 1E10) ? Instant.ofEpochMilli(value) : Instant.ofEpochSecond(value);
+        } else if (timeObject instanceof Double || timeObject instanceof Float || timeObject instanceof BigDecimal) {
+            double value = ((Number)timeObject).doubleValue();
+            long seconds = (long) value;
+            long nanos = (long) ((value - seconds) * 1_000_000_000);
+            return Instant.ofEpochSecond(seconds, nanos);
+        } else {
+            throw new RuntimeException("Invalid format for time "+timeObject);
+        }
+    }
 
     @Override
     public void prepareForShutdown() {
@@ -149,7 +187,20 @@ public class AggregateProcessor extends AbstractProcessor<Record<Event>, Record<
     }
 
     @Override
+    public boolean isForLocalProcessingOnly(Event event) {
+        // no need to check for when condition here because it is
+        // done in doExecute(). isApplicableEventForPeerForwarding()
+        // checks for when condition because it is an optimization to
+        // not send events not matching the condition to remote peer
+        // only to be skipped later.
+        return localMode;
+    }
+
+    @Override
     public boolean isApplicableEventForPeerForwarding(Event event) {
+        if (localMode) {
+            return false;
+        }
         if (whenCondition == null) {
             return true;
         }

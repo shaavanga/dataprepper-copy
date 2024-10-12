@@ -26,8 +26,10 @@ import software.amazon.awssdk.enhanced.dynamodb.DynamoDbIndex;
 import software.amazon.awssdk.enhanced.dynamodb.DynamoDbTable;
 import software.amazon.awssdk.enhanced.dynamodb.mapper.BeanTableSchema;
 import software.amazon.awssdk.enhanced.dynamodb.model.CreateTableEnhancedRequest;
+import software.amazon.awssdk.enhanced.dynamodb.model.DeleteItemEnhancedRequest;
 import software.amazon.awssdk.enhanced.dynamodb.model.GetItemEnhancedRequest;
 import software.amazon.awssdk.enhanced.dynamodb.model.Page;
+import software.amazon.awssdk.enhanced.dynamodb.model.PageIterable;
 import software.amazon.awssdk.enhanced.dynamodb.model.PutItemEnhancedRequest;
 import software.amazon.awssdk.enhanced.dynamodb.model.QueryEnhancedRequest;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
@@ -56,7 +58,9 @@ import java.util.Random;
 import java.util.UUID;
 import java.util.stream.Stream;
 
+import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -282,9 +286,26 @@ public class DynamoDbClientWrapperTest {
         assertThat(putItemEnhancedRequest.conditionExpression().expression(), equalTo(ITEM_DOES_NOT_EXIST_EXPRESSION));
     }
 
+    @Test
+    void tryCreatePartitionItem_catches_conditionalCheckFailedException_from_putItem_and_returns_false() throws NoSuchFieldException, IllegalAccessException {
+        final DynamoDbSourcePartitionItem dynamoDbSourcePartitionItem = mock(DynamoDbSourcePartitionItem.class);
+
+        final DynamoDbTable<DynamoDbSourcePartitionItem> table = mock(DynamoDbTable.class);
+        doThrow(ConditionalCheckFailedException.class).when(table).putItem(any(PutItemEnhancedRequest.class));
+
+        final DynamoDbClientWrapper objectUnderTest = createObjectUnderTest();
+
+        reflectivelySetField(objectUnderTest, "table", table);
+
+        final boolean result = objectUnderTest.tryCreatePartitionItem(dynamoDbSourcePartitionItem);
+
+        assertThat(result, equalTo(false));
+    }
+
     @ParameterizedTest
     @MethodSource("exceptionProvider")
-    void tryCreatePartitionItem_catches_exception_from_putItem_and_returns_false(final Class exception) throws NoSuchFieldException, IllegalAccessException {
+    void tryCreatePartitionItem_catches_exception_other_than_conditionalCheckFailedException_from_putItem_and_throws_partitionUpdateException(
+            final Class exception) throws NoSuchFieldException, IllegalAccessException {
         final DynamoDbSourcePartitionItem dynamoDbSourcePartitionItem = mock(DynamoDbSourcePartitionItem.class);
 
         final DynamoDbTable<DynamoDbSourcePartitionItem> table = mock(DynamoDbTable.class);
@@ -294,9 +315,8 @@ public class DynamoDbClientWrapperTest {
 
         reflectivelySetField(objectUnderTest, "table", table);
 
-        final boolean result = objectUnderTest.tryCreatePartitionItem(dynamoDbSourcePartitionItem);
-
-        assertThat(result, equalTo(false));
+        assertThrows(PartitionUpdateException.class,
+                () -> objectUnderTest.tryCreatePartitionItem(dynamoDbSourcePartitionItem));
     }
 
     @Test
@@ -705,8 +725,107 @@ public class DynamoDbClientWrapperTest {
 
     }
 
+    @Test
+    void queryAllPartitions_success() throws NoSuchFieldException, IllegalAccessException {
+        final DynamoDbTable<DynamoDbSourcePartitionItem> table = mock(DynamoDbTable.class);
+        final DynamoDbSourcePartitionItem firstItem = mock(DynamoDbSourcePartitionItem.class);
+        final DynamoDbSourcePartitionItem secondItem = mock(DynamoDbSourcePartitionItem.class);
+        final PageIterable<DynamoDbSourcePartitionItem> availableItems =  () -> {
+            final Page<DynamoDbSourcePartitionItem> page = mock(Page.class);
+            given(page.items()).willReturn(List.of(firstItem, secondItem));
+            return List.of(page).iterator();
+        };
+
+        given(table.query(any(QueryEnhancedRequest.class))).willReturn(availableItems);
+
+        final DynamoDbClientWrapper objectUnderTest = createObjectUnderTest();
+        reflectivelySetField(objectUnderTest, "table", table);
+
+        final List<SourcePartitionStoreItem> result = objectUnderTest.queryAllPartitions(UUID.randomUUID().toString());
+
+        assertThat(result, is(List.of(firstItem, secondItem)));
+        verifyNoMoreInteractions(table);
+        verifyNoInteractions(secondItem);
+
+    }
+
+    @Test
+    void queryAllPartitions_empty_results() throws NoSuchFieldException, IllegalAccessException {
+        final DynamoDbTable<DynamoDbSourcePartitionItem> table = mock(DynamoDbTable.class);
+        final PageIterable<DynamoDbSourcePartitionItem> availableItems =  () -> {
+            final Page<DynamoDbSourcePartitionItem> page = mock(Page.class);
+            given(page.items()).willReturn(Collections.emptyList());
+            return List.of(page).iterator();
+        };
+
+        given(table.query(any(QueryEnhancedRequest.class))).willReturn(availableItems);
+
+        final DynamoDbClientWrapper objectUnderTest = createObjectUnderTest();
+        reflectivelySetField(objectUnderTest, "table", table);
+
+        final List<SourcePartitionStoreItem> result = objectUnderTest.queryAllPartitions(UUID.randomUUID().toString());
+
+        assertThat(result, is(empty()));
+        verifyNoMoreInteractions(table);
+    }
+
+    @Test
+    void tryDeletePartition_item_success_calls_delete_on_correct_item() throws NoSuchFieldException, IllegalAccessException {
+
+        final String ddbPartitionKey = UUID.randomUUID().toString();
+        final String ddbSortKey = UUID.randomUUID().toString();
+
+        final DynamoDbSourcePartitionItem dynamoDbSourcePartitionItem = mock(DynamoDbSourcePartitionItem.class);
+        when(dynamoDbSourcePartitionItem.getSourceIdentifier()).thenReturn(ddbPartitionKey);
+        when(dynamoDbSourcePartitionItem.getSourcePartitionKey()).thenReturn(ddbSortKey);
+
+        final Long version = (long) new Random().nextInt(10);
+        given(dynamoDbSourcePartitionItem.getVersion()).willReturn(version).willReturn(version + 1L);
+
+        final ArgumentCaptor<DeleteItemEnhancedRequest> deleteItemEnhancedRequestArgumentCaptor = ArgumentCaptor.forClass(DeleteItemEnhancedRequest.class);
+
+        final DynamoDbTable<DynamoDbSourcePartitionItem> table = mock(DynamoDbTable.class);
+        when(table.deleteItem(deleteItemEnhancedRequestArgumentCaptor.capture())).thenReturn(mock(DynamoDbSourcePartitionItem.class));
+
+        final DynamoDbClientWrapper objectUnderTest = createObjectUnderTest();
+
+        reflectivelySetField(objectUnderTest, "table", table);
+
+        objectUnderTest.tryDeletePartitionItem(dynamoDbSourcePartitionItem);
+
+        verify(dynamoDbSourcePartitionItem).setVersion(version + 1L);
+
+        final DeleteItemEnhancedRequest deleteItemEnhancedRequest = deleteItemEnhancedRequestArgumentCaptor.getValue();
+
+        assertThat(deleteItemEnhancedRequest.key(), notNullValue());
+        assertThat(deleteItemEnhancedRequest.key().partitionKeyValue(), notNullValue());
+        assertThat(deleteItemEnhancedRequest.key().partitionKeyValue().s(), equalTo(ddbPartitionKey));
+        assertThat(deleteItemEnhancedRequest.key().sortKeyValue(), notNullValue());
+        assertThat(deleteItemEnhancedRequest.key().sortKeyValue().isPresent(), equalTo(true));
+        assertThat(deleteItemEnhancedRequest.key().sortKeyValue().get().s(), equalTo(ddbSortKey));
+        assertThat(deleteItemEnhancedRequest.conditionExpression().expression(), equalTo(ITEM_EXISTS_AND_HAS_LATEST_VERSION));
+        assertThat(deleteItemEnhancedRequest.conditionExpression().expressionValues(), notNullValue());
+        assertThat(deleteItemEnhancedRequest.conditionExpression().expressionValues().containsKey(":v"), equalTo(true));
+        assertThat(deleteItemEnhancedRequest.conditionExpression().expressionValues().get(":v"), notNullValue());
+        assertThat(deleteItemEnhancedRequest.conditionExpression().expressionValues().get(":v").n(), equalTo(version.toString()));
+    }
+
+    @Test
+    void tryDeletePartition_with_exception_throws_PartitionUpdateException() throws NoSuchFieldException, IllegalAccessException {
+        final DynamoDbTable<DynamoDbSourcePartitionItem> table = mock(DynamoDbTable.class);
+        when(table.deleteItem(any(DeleteItemEnhancedRequest.class))).thenThrow(RuntimeException.class);
+
+        final DynamoDbClientWrapper objectUnderTest = createObjectUnderTest();
+
+        reflectivelySetField(objectUnderTest, "table", table);
+
+        final DynamoDbSourcePartitionItem dynamoDbSourcePartitionItem = mock(DynamoDbSourcePartitionItem.class);
+        assertThrows(PartitionUpdateException.class, () -> objectUnderTest.tryDeletePartitionItem(dynamoDbSourcePartitionItem));
+    }
+
+
     static Stream<Class> exceptionProvider() {
-        return Stream.of(ConditionalCheckFailedException.class, RuntimeException.class, PartitionUpdateException.class);
+        return Stream.of(RuntimeException.class, PartitionUpdateException.class);
     }
 
     private void reflectivelySetField(final DynamoDbClientWrapper dynamoDbClientWrapper, final String fieldName, final Object value) throws NoSuchFieldException, IllegalAccessException {

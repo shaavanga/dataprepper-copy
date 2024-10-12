@@ -21,10 +21,12 @@ import software.amazon.awssdk.services.dynamodb.model.ProvisionedThroughput;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.Random;
 import java.util.UUID;
 
+import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
@@ -200,6 +202,45 @@ public class DynamoDbSourceCoordinationStoreTest {
     }
 
     @Test
+    void tryUpdateSourcePartitionItem_calls_dynamoClientWrapper_correctly_for_unassigned_status() {
+        final String sourceIdentifier = UUID.randomUUID().toString();
+
+        final SourcePartitionStoreItem updateItem = mock(DynamoDbSourcePartitionItem.class);
+        given(updateItem.getSourceIdentifier()).willReturn(sourceIdentifier);
+        given(updateItem.getSourcePartitionStatus()).willReturn(SourcePartitionStatus.UNASSIGNED);
+
+        given(dynamoStoreSettings.getTtl()).willReturn(null);
+
+        doNothing().when(dynamoDbClientWrapper).tryUpdatePartitionItem((DynamoDbSourcePartitionItem) updateItem);
+
+        createObjectUnderTest().tryUpdateSourcePartitionItem(updateItem);
+
+        verify((DynamoDbSourcePartitionItem) updateItem, never()).setPartitionPriority(any(String.class));
+
+        verify((DynamoDbSourcePartitionItem) updateItem).setSourceStatusCombinationKey(sourceIdentifier + "|" + SourcePartitionStatus.UNASSIGNED);
+    }
+
+    @Test
+    void tryUpdateSourcePartitionItem_calls_dynamoClientWrapper_correctly_for_unassigned_status_with_priority_override() {
+        final String sourceIdentifier = UUID.randomUUID().toString();
+        final Instant priorityOverride = Instant.now();
+
+        final SourcePartitionStoreItem updateItem = mock(DynamoDbSourcePartitionItem.class);
+        given(updateItem.getSourceIdentifier()).willReturn(sourceIdentifier);
+        given(updateItem.getSourcePartitionStatus()).willReturn(SourcePartitionStatus.UNASSIGNED);
+
+        given(dynamoStoreSettings.getTtl()).willReturn(null);
+
+        doNothing().when(dynamoDbClientWrapper).tryUpdatePartitionItem((DynamoDbSourcePartitionItem) updateItem);
+
+        createObjectUnderTest().tryUpdateSourcePartitionItem(updateItem, priorityOverride);
+
+        verify((DynamoDbSourcePartitionItem) updateItem).setPartitionPriority(priorityOverride.toString());
+
+        verify((DynamoDbSourcePartitionItem) updateItem).setSourceStatusCombinationKey(sourceIdentifier + "|" + SourcePartitionStatus.UNASSIGNED);
+    }
+
+    @Test
     void getAvailablePartition_with_no_item_acquired_returns_empty_optional() {
         final String ownerId = UUID.randomUUID().toString();
         final String sourceIdentifier = UUID.randomUUID().toString();
@@ -305,5 +346,25 @@ public class DynamoDbSourceCoordinationStoreTest {
         assertThat(result.get(), equalTo(acquiredItem));
 
         verifyNoMoreInteractions(dynamoDbClientWrapper);
+    }
+
+    @Test
+    void queryAllSourcePartitionItems_success() {
+        final String sourceIdentifier = UUID.randomUUID().toString();
+        final SourcePartitionStoreItem sourcePartitionStoreItem = mock(DynamoDbSourcePartitionItem.class);
+        given(dynamoDbClientWrapper.queryAllPartitions(sourceIdentifier)).willReturn(List.of(sourcePartitionStoreItem));
+        List<SourcePartitionStoreItem> sourcePartitionStoreItems = createObjectUnderTest().queryAllSourcePartitionItems(sourceIdentifier);
+        assertThat(sourcePartitionStoreItems, is(List.of(sourcePartitionStoreItem)));
+    }
+
+    @Test
+    void tryDeletePartitionItem_calls_client_wrapper_to_delete_partition() {
+        final DynamoDbSourcePartitionItem sourcePartitionStoreItem = mock(DynamoDbSourcePartitionItem.class);
+        doNothing().when(dynamoDbClientWrapper).tryDeletePartitionItem(sourcePartitionStoreItem);
+
+
+        createObjectUnderTest().tryDeletePartitionItem(sourcePartitionStoreItem);
+
+        verify(dynamoDbClientWrapper).tryDeletePartitionItem(sourcePartitionStoreItem);
     }
 }

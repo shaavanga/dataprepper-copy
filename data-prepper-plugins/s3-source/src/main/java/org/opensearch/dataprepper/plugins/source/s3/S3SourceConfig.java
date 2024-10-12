@@ -9,6 +9,9 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.Max;
+import org.opensearch.dataprepper.aws.validator.AwsAccountId;
 import org.opensearch.dataprepper.model.configuration.PluginModel;
 import org.opensearch.dataprepper.plugins.codec.CompressionOption;
 import org.opensearch.dataprepper.plugins.source.s3.configuration.AwsAuthenticationOptions;
@@ -24,6 +27,8 @@ import java.util.Map;
 
 public class S3SourceConfig {
     static final Duration DEFAULT_BUFFER_TIMEOUT = Duration.ofSeconds(10);
+    static final Duration DEFAULT_BACKOFF_MILLIS = Duration.ofMillis(30000);
+    static final int DEFAULT_NUMBER_OF_WORKERS = 1;
     static final int DEFAULT_NUMBER_OF_RECORDS_TO_ACCUMULATE = 100;
     static final String DEFAULT_METADATA_ROOT_KEY = "s3/";
 
@@ -42,6 +47,12 @@ public class S3SourceConfig {
     @JsonProperty("sqs")
     @Valid
     private SqsOptions sqsOptions;
+
+    @JsonProperty("workers")
+    @Min(1)
+    @Max(1000)
+    @Valid
+    private int numWorkers = DEFAULT_NUMBER_OF_WORKERS;
 
     @JsonProperty("aws")
     @NotNull
@@ -64,9 +75,13 @@ public class S3SourceConfig {
     private boolean disableBucketOwnershipValidation = false;
 
     @JsonProperty("bucket_owners")
-    private Map<String, String> bucketOwners;
+    private Map<String, @AwsAccountId String> bucketOwners;
+
+    @JsonProperty("backoff_time")
+    private Duration backOff = DEFAULT_BACKOFF_MILLIS;
 
     @JsonProperty("default_bucket_owner")
+    @AwsAccountId
     private String defaultBucketOwner;
 
     @JsonProperty("metadata_root_key")
@@ -82,6 +97,9 @@ public class S3SourceConfig {
     @JsonProperty("delete_s3_objects_on_read")
     private boolean deleteS3ObjectsOnRead = false;
 
+    @JsonProperty("disable_s3_metadata_in_event")
+    private boolean deleteS3MetadataInEvent = false;
+
     @AssertTrue(message = "A codec is required for reading objects.")
     boolean isCodecProvidedWhenNeeded() {
         if(s3SelectOptions == null)
@@ -89,8 +107,22 @@ public class S3SourceConfig {
         return true;
     }
 
+    @AssertTrue(message = "acknowledgments and delete_s3_objects_on_read must both be set to true when using folder_partitions mode")
+    boolean isPrefixPartitionModeValid() {
+        if (s3ScanScanOptions != null &&
+                s3ScanScanOptions.getPartitioningOptions() != null) {
+            return acknowledgments && deleteS3ObjectsOnRead;
+        }
+
+        return true;
+    }
+
     public NotificationTypeOption getNotificationType() {
         return notificationType;
+    }
+
+    public Duration getBackOff() {
+        return backOff;
     }
 
     public NotificationSourceOption getNotificationSource() {
@@ -99,6 +131,10 @@ public class S3SourceConfig {
 
     boolean getAcknowledgements() {
         return acknowledgments;
+    }
+
+    public int getNumWorkers() {
+        return numWorkers;
     }
 
     public CompressionOption getCompression() {
@@ -155,5 +191,9 @@ public class S3SourceConfig {
 
     public String getDefaultBucketOwner() {
         return defaultBucketOwner;
+    }
+
+    public boolean isDeleteS3MetadataInEvent() {
+        return deleteS3MetadataInEvent;
     }
 }

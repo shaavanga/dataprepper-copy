@@ -13,6 +13,7 @@ import org.opensearch.dataprepper.expression.ExpressionEvaluator;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.event.JacksonEvent;
+import org.opensearch.dataprepper.model.plugin.InvalidPluginConfigurationException;
 import org.opensearch.dataprepper.model.record.Record;
 
 import java.util.ArrayList;
@@ -45,6 +46,17 @@ public class AddEntryProcessorTests {
 
     @Mock
     private ExpressionEvaluator expressionEvaluator;
+
+    @Test
+    void invalid_add_when_throws_InvalidPluginConfigurationException() {
+        final String addWhen = UUID.randomUUID().toString();
+
+        when(mockConfig.getEntries()).thenReturn(createListOfEntries(createEntry("newMessage", null, 3, null, null, false, false,addWhen)));
+
+        when(expressionEvaluator.isValidExpressionStatement(addWhen)).thenReturn(false);
+
+        assertThrows(InvalidPluginConfigurationException.class, this::createObjectUnderTest);
+    }
 
     @Test
     public void testSingleAddProcessorTests() {
@@ -417,6 +429,7 @@ public class AddEntryProcessorTests {
         final String addWhen = UUID.randomUUID().toString();
 
         when(mockConfig.getEntries()).thenReturn(createListOfEntries(createEntry("newMessage", null, 3, null, null, false, false,addWhen)));
+        when(expressionEvaluator.isValidExpressionStatement(addWhen)).thenReturn(true);
 
         final AddEntryProcessor processor = createObjectUnderTest();
         final Record<Event> record = getEvent("thisisamessage");
@@ -434,6 +447,7 @@ public class AddEntryProcessorTests {
         final String addWhen = UUID.randomUUID().toString();
 
         when(mockConfig.getEntries()).thenReturn(createListOfEntries(createEntry(null, "newMessage", 3, null, null, false, false,addWhen)));
+        when(expressionEvaluator.isValidExpressionStatement(addWhen)).thenReturn(true);
 
         final AddEntryProcessor processor = createObjectUnderTest();
         final Record<Event> record = getEventWithMetadata("thisisamessage", Map.of("key", "value"));
@@ -636,6 +650,80 @@ public class AddEntryProcessorTests {
         final List<Record<Event>> editedRecords = (List<Record<Event>>) processor.doExecute(Collections.singletonList(record));
         Map<String, Object> attributes = editedRecords.get(0).getData().getMetadata().getAttributes();
         assertThat(attributes.get("newkey"), equalTo(randomString));
+    }
+
+    @Test
+    public void testAddSingleFieldWithDynamicKey() {
+        when(mockConfig.getEntries()).thenReturn(createListOfEntries(createEntry("${message}", null, 3, null, null, false, false,null)));
+
+        final AddEntryProcessor processor = createObjectUnderTest();
+        final Record<Event> record = getEvent("value_as_name");
+        final List<Record<Event>> editedRecords = (List<Record<Event>>) processor.doExecute(Collections.singletonList(record));
+
+        assertThat(editedRecords.get(0).getData().containsKey("message"), is(true));
+        assertThat(editedRecords.get(0).getData().get("message", Object.class), equalTo("value_as_name"));
+        assertThat(editedRecords.get(0).getData().containsKey("value_as_name"), is(true));
+        assertThat(editedRecords.get(0).getData().get("value_as_name", Object.class), equalTo(3));
+    }
+
+    @Test
+    public void testAddSingleFieldWithDynamicExpression() {
+        when(mockConfig.getEntries()).thenReturn(createListOfEntries(createEntry("${message}_${getMetadata(\"id\")}", null, 3, null, null, false, false,null)));
+
+        final AddEntryProcessor processor = createObjectUnderTest();
+        final Record<Event> record = getEventWithMetadata("value_as_name", Map.of("id", 1));
+        when(expressionEvaluator.isValidExpressionStatement("getMetadata(\"id\")")).thenReturn(true);
+        when(expressionEvaluator.evaluate("getMetadata(\"id\")", record.getData())).thenReturn(1);
+        final List<Record<Event>> editedRecords = (List<Record<Event>>) processor.doExecute(Collections.singletonList(record));
+
+        assertThat(editedRecords.get(0).getData().containsKey("message"), is(true));
+        assertThat(editedRecords.get(0).getData().get("message", Object.class), equalTo("value_as_name"));
+        assertThat(editedRecords.get(0).getData().containsKey("value_as_name_1"), is(true));
+        assertThat(editedRecords.get(0).getData().get("value_as_name_1", Object.class), equalTo(3));
+    }
+
+    @Test
+    public void testAddMultipleFieldsWithDynamicKeys() {
+        when(mockConfig.getEntries()).thenReturn(createListOfEntries(createEntry("${message}", null, 3, null, null, false, false,null),
+                createEntry("${message}_2", null, 4, null, null, false, false,null)));
+
+        final AddEntryProcessor processor = createObjectUnderTest();
+        final Record<Event> record = getEvent("value_as_name");
+        final List<Record<Event>> editedRecords = (List<Record<Event>>) processor.doExecute(Collections.singletonList(record));
+
+        assertThat(editedRecords.get(0).getData().containsKey("message"), is(true));
+        assertThat(editedRecords.get(0).getData().get("message", Object.class), equalTo("value_as_name"));
+        assertThat(editedRecords.get(0).getData().containsKey("value_as_name"), is(true));
+        assertThat(editedRecords.get(0).getData().get("value_as_name", Object.class), equalTo(3));
+        assertThat(editedRecords.get(0).getData().containsKey("value_as_name_2"), is(true));
+        assertThat(editedRecords.get(0).getData().get("value_as_name_2", Object.class), equalTo(4));
+    }
+
+    @Test
+    public void testAddFieldWithInvalidInputKeyThenNoChangeToEvent() {
+        when(mockConfig.getEntries()).thenReturn(createListOfEntries(createEntry("${message", null, 3, null, null, false, false,null)));
+
+        final AddEntryProcessor processor = createObjectUnderTest();
+        final Record<Event> record = getEvent("value_as_name");
+        final List<Record<Event>> editedRecords = (List<Record<Event>>) processor.doExecute(Collections.singletonList(record));
+
+        assertThat(editedRecords.get(0).getData().containsKey("message"), is(true));
+        assertThat(editedRecords.get(0).getData().get("message", Object.class), equalTo("value_as_name"));
+        assertThat(editedRecords.get(0).getData().containsKey("value_as_name"), is(false));
+        assertThat(editedRecords.get(0).getData().toMap().size(), is(1));
+    }
+
+    @Test
+    public void testAddFieldWithInvalidDynamicKeyThenNoChangeToEvent() {
+        when(mockConfig.getEntries()).thenReturn(createListOfEntries(createEntry("${message}", null, 3, null, null, false, false,null)));
+
+        final AddEntryProcessor processor = createObjectUnderTest();
+        final Record<Event> record = getEvent("name_with_invalid_chars|[$");
+        final List<Record<Event>> editedRecords = (List<Record<Event>>) processor.doExecute(Collections.singletonList(record));
+
+        assertThat(editedRecords.get(0).getData().containsKey("message"), is(true));
+        assertThat(editedRecords.get(0).getData().get("message", Object.class), equalTo("name_with_invalid_chars|[$"));
+        assertThat(editedRecords.get(0).getData().toMap().size(), is(1));
     }
 
     private AddEntryProcessor createObjectUnderTest() {

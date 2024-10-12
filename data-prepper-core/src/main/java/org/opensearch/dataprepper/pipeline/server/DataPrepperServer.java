@@ -30,25 +30,29 @@ public class DataPrepperServer {
     private static final Logger LOG = LoggerFactory.getLogger(DataPrepperServer.class);
     private final HttpServerProvider serverProvider;
     private final ListPipelinesHandler listPipelinesHandler;
+    private final GetPipelinesHandler getPipelinesHandler;
     private final ShutdownHandler shutdownHandler;
     private final PrometheusMeterRegistry prometheusMeterRegistry;
     private final Authenticator authenticator;
+    private final ExecutorService executorService;
     private HttpServer server;
-    static final ExecutorService EXECUTOR_SERVICE = Executors.newFixedThreadPool(3);
 
     @Inject
     public DataPrepperServer(
             final HttpServerProvider serverProvider,
             final ListPipelinesHandler listPipelinesHandler,
             final ShutdownHandler shutdownHandler,
+            final GetPipelinesHandler getPipelinesHandler,
             @Autowired(required = false) @Nullable final PrometheusMeterRegistry prometheusMeterRegistry,
             @Autowired(required = false) @Nullable final Authenticator authenticator
     ) {
         this.serverProvider = serverProvider;
         this.listPipelinesHandler = listPipelinesHandler;
         this.shutdownHandler = shutdownHandler;
+        this.getPipelinesHandler = getPipelinesHandler;
         this.prometheusMeterRegistry = prometheusMeterRegistry;
         this.authenticator = authenticator;
+        executorService = Executors.newFixedThreadPool(3);
     }
 
     /**
@@ -56,7 +60,7 @@ public class DataPrepperServer {
      */
     public void start() {
         server = createServer();
-        server.setExecutor(EXECUTOR_SERVICE);
+        server.setExecutor(executorService);
         server.start();
         LOG.info("Data Prepper server running at :{}", server.getAddress().getPort());
     }
@@ -66,6 +70,7 @@ public class DataPrepperServer {
 
         createContext(server, listPipelinesHandler, authenticator, "/list");
         createContext(server, shutdownHandler, authenticator, "/shutdown");
+        createContext(server, getPipelinesHandler, authenticator, "/pipelines");
 
         if (prometheusMeterRegistry != null) {
             final PrometheusMetricsHandler prometheusMetricsHandler = new PrometheusMetricsHandler(prometheusMeterRegistry);
@@ -95,7 +100,7 @@ public class DataPrepperServer {
      */
     public void stop() {
         server.stop(0);
-        EXECUTOR_SERVICE.shutdownNow();
+        executorService.shutdownNow();
         LOG.info("Data Prepper server stopped");
     }
 }

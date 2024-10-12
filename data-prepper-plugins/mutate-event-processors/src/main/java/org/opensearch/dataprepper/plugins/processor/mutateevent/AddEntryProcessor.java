@@ -6,11 +6,14 @@
 package org.opensearch.dataprepper.plugins.processor.mutateevent;
 
 import org.opensearch.dataprepper.expression.ExpressionEvaluator;
+import static org.opensearch.dataprepper.logging.DataPrepperMarkers.EVENT;
+import static org.opensearch.dataprepper.logging.DataPrepperMarkers.NOISY;
 import org.opensearch.dataprepper.metrics.PluginMetrics;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPlugin;
 import org.opensearch.dataprepper.model.annotations.DataPrepperPluginConstructor;
 import org.opensearch.dataprepper.model.event.Event;
 import org.opensearch.dataprepper.model.event.exceptions.EventKeyNotFoundException;
+import org.opensearch.dataprepper.model.plugin.InvalidPluginConfigurationException;
 import org.opensearch.dataprepper.model.processor.AbstractProcessor;
 import org.opensearch.dataprepper.model.processor.Processor;
 import org.opensearch.dataprepper.model.record.Record;
@@ -25,8 +28,6 @@ import java.util.Objects;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
-import static org.opensearch.dataprepper.logging.DataPrepperMarkers.EVENT;
-
 @DataPrepperPlugin(name = "add_entries", pluginType = Processor.class, pluginConfigurationType = AddEntryProcessorConfig.class)
 public class AddEntryProcessor extends AbstractProcessor<Record<Event>, Record<Event>> {
     private static final Logger LOG = LoggerFactory.getLogger(AddEntryProcessor.class);
@@ -39,6 +40,14 @@ public class AddEntryProcessor extends AbstractProcessor<Record<Event>, Record<E
         super(pluginMetrics);
         this.entries = config.getEntries();
         this.expressionEvaluator = expressionEvaluator;
+
+        config.getEntries().forEach(entry -> {
+            if (entry.getAddWhen() != null
+                    && !expressionEvaluator.isValidExpressionStatement(entry.getAddWhen())) {
+                throw new InvalidPluginConfigurationException(
+                        String.format("add_when %s is not a valid expression statement. See https://opensearch.org/docs/latest/data-prepper/pipelines/expression-syntax/ for valid expression syntax", entry.getAddWhen()));
+            }
+        });
     }
 
     @Override
@@ -54,7 +63,7 @@ public class AddEntryProcessor extends AbstractProcessor<Record<Event>, Record<E
                     }
 
                     try {
-                        final String key = entry.getKey();
+                        final String key = (entry.getKey() == null) ? null : recordEvent.formatString(entry.getKey(), expressionEvaluator);
                         final String metadataKey = entry.getMetadataKey();
                         Object value;
                         if (!Objects.isNull(entry.getValueExpression())) {
@@ -83,12 +92,28 @@ public class AddEntryProcessor extends AbstractProcessor<Record<Event>, Record<E
                             }
                         }
                     } catch (Exception e) {
-                        LOG.error(EVENT, "Error adding entry to record [{}] with key [{}], metadataKey [{}], value_expression [{}] format [{}], value [{}]",
-                                recordEvent, entry.getKey(), entry.getMetadataKey(), entry.getValueExpression(), entry.getFormat(), entry.getValue(), e);
+                        LOG.atError()
+                                .addMarker(EVENT)
+                                .addMarker(NOISY)
+                                .setMessage("Error adding entry to record [{}] with key [{}], metadataKey [{}], value_expression [{}] format [{}], value [{}]")
+                                .addArgument(recordEvent)
+                                .addArgument(entry.getKey())
+                                .addArgument(entry.getMetadataKey())
+                                .addArgument(entry.getValueExpression())
+                                .addArgument(entry.getFormat())
+                                .addArgument(entry.getValue())
+                                .setCause(e)
+                                .log();
                     }
                 }
             } catch(final Exception e){
-                LOG.error(EVENT, "There was an exception while processing Event [{}]", recordEvent, e);
+                LOG.atError()
+                        .addMarker(EVENT)
+                        .addMarker(NOISY)
+                        .setMessage("There was an exception while processing Event [{}]")
+                        .addArgument(recordEvent)
+                        .setCause(e)
+                        .log();
             }
         }
 

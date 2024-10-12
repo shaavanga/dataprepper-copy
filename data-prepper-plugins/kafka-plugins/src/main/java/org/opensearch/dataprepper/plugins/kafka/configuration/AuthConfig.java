@@ -5,6 +5,7 @@
 
 package org.opensearch.dataprepper.plugins.kafka.configuration;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.AssertTrue;
@@ -18,8 +19,12 @@ import java.util.stream.Stream;
 public class AuthConfig {
 
     public static class SaslAuthConfig {
+        @JsonAlias("plain")
         @JsonProperty("plaintext")
         private PlainTextAuthConfig plainTextAuthConfig;
+
+        @JsonProperty("scram")
+        private ScramAuthConfig scramAuthConfig;
 
         @JsonProperty("oauth")
         private OAuthConfig oAuthConfig;
@@ -38,6 +43,10 @@ public class AuthConfig {
             return plainTextAuthConfig;
         }
 
+        public ScramAuthConfig getScramAuthConfig() {
+            return scramAuthConfig;
+        }
+
         public OAuthConfig getOAuthConfig() {
             return oAuthConfig;
         }
@@ -46,9 +55,9 @@ public class AuthConfig {
             return sslEndpointAlgorithm;
         }
 
-        @AssertTrue(message = "Only one of AwsIam or oAuth or PlainText auth config must be specified")
+        @AssertTrue(message = "Only one of AwsIam or oAuth or SCRAM or PlainText auth config must be specified")
         public boolean hasOnlyOneConfig() {
-            return Stream.of(awsIamAuthConfig, plainTextAuthConfig, oAuthConfig).filter(n -> n != null).count() == 1;
+            return Stream.of(awsIamAuthConfig, plainTextAuthConfig, oAuthConfig, scramAuthConfig).filter(n -> n != null).count() == 1;
         }
 
     }
